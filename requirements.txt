@@ -1,0 +1,6 @@
+torch
+gymnasium
+gymnasium[box2d]
+numpy
+matplotlib
+
