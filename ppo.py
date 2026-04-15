@@ -3,6 +3,7 @@ import torch.nn as nn
 import numpy as np
 import gymnasium as gym
 import time
+from typing import Tuple
 
 
 class RunningMeanStd:
@@ -67,18 +68,36 @@ class ActorCritic(nn.Module):
         return logits, value
 
 
-def collect_rollout(model, env, obs, obs_rms: RunningMeanStd, num_steps=2048):
-    episode_rewards = []
-    episode_reward = 0.0
+def collect_rollout_vec(
+    model: nn.Module,
+    envs: gym.vector.VectorEnv,
+    obs: np.ndarray,
+    obs_rms: RunningMeanStd,
+    num_steps: int,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, np.ndarray, np.ndarray]:
+    """
+    Collect a rollout from vectorized environments.
 
-    states, actions, log_probs = [], [], []
-    rewards, episode_ends = [], []
-    values, next_values = [], []
+    Returns tensors with shape [T, N, ...] (except episode return list).
+    """
+    n_envs = obs.shape[0]
+    obs_dim = obs.shape[1]
 
-    for _ in range(num_steps):
-        obs_rms.update(obs[None, :])
+    states = torch.zeros((num_steps, n_envs, obs_dim), dtype=torch.float32)
+    actions = torch.zeros((num_steps, n_envs), dtype=torch.int64)
+    log_probs = torch.zeros((num_steps, n_envs), dtype=torch.float32)
+    rewards = torch.zeros((num_steps, n_envs), dtype=torch.float32)
+    dones = torch.zeros((num_steps, n_envs), dtype=torch.float32)
+    terminateds = torch.zeros((num_steps, n_envs), dtype=torch.float32)
+    values = torch.zeros((num_steps, n_envs), dtype=torch.float32)
+    next_values = torch.zeros((num_steps, n_envs), dtype=torch.float32)
+
+    ep_returns = np.zeros((n_envs,), dtype=np.float32)
+    finished_ep_returns = []
+
+    for t in range(num_steps):
+        obs_rms.update(obs)
         obs_n = normalize_obs(obs, obs_rms)
-        # Avoid potential aliasing with numpy buffers
         obs_tensor = torch.tensor(obs_n, dtype=torch.float32)
 
         with torch.no_grad():
@@ -86,70 +105,89 @@ def collect_rollout(model, env, obs, obs_rms: RunningMeanStd, num_steps=2048):
 
         dist = torch.distributions.Categorical(logits=logits)
         action = dist.sample()
+        lp = dist.log_prob(action)
 
-        next_obs, reward, terminated, truncated, _ = env.step(action.item())
-        obs_rms.update(next_obs[None, :])
-        next_obs_n = normalize_obs(next_obs, obs_rms)
+        next_obs, reward, terminated, truncated, infos = envs.step(action.cpu().numpy())
+        done = np.logical_or(terminated, truncated)
+
+        # For bootstrap, we want V(s_{t+1}) based on the *real* next state.
+        # Some Gymnasium vector envs autoreset and return the reset observation in `next_obs`
+        # while providing terminal observations in `infos["final_observation"]`.
+        next_obs_for_value = next_obs
+        if isinstance(infos, dict) and "final_observation" in infos:
+            final_mask = infos.get("_final_observation", done)
+            final_obs = infos["final_observation"]
+            if np.any(final_mask):
+                next_obs_for_value = np.array(next_obs, copy=True)
+                for i in np.where(final_mask)[0]:
+                    next_obs_for_value[i] = np.asarray(final_obs[i], dtype=next_obs.dtype)
+
+        obs_rms.update(next_obs_for_value)
+        next_obs_n = normalize_obs(next_obs_for_value, obs_rms)
         next_obs_tensor = torch.tensor(next_obs_n, dtype=torch.float32)
-
         with torch.no_grad():
             _, next_value = model(next_obs_tensor)
+        next_value = next_value * torch.tensor(1.0 - terminated.astype(np.float32))
 
-        # bootstrap only if NOT a true terminal
-        if terminated:
-            next_value = torch.zeros_like(value)
+        states[t] = obs_tensor
+        actions[t] = action
+        log_probs[t] = lp
+        rewards[t] = torch.tensor(reward, dtype=torch.float32)
+        dones[t] = torch.tensor(done.astype(np.float32))
+        terminateds[t] = torch.tensor(terminated.astype(np.float32))
+        values[t] = value
+        next_values[t] = next_value
 
-        states.append(obs_tensor)
-        actions.append(action)
-        log_probs.append(dist.log_prob(action))
-        rewards.append(float(reward))
-        episode_ends.append(bool(terminated or truncated))
-        values.append(value)
-        next_values.append(next_value)
+        ep_returns += reward.astype(np.float32)
+        if np.any(done):
+            for i in np.where(done)[0]:
+                finished_ep_returns.append(float(ep_returns[i]))
+                ep_returns[i] = 0.0
 
-        episode_reward += reward
+        # Do NOT manually reset here. Vector envs handle resetting based on their autoreset mode.
+        obs = next_obs
 
-        if terminated or truncated:
-            episode_rewards.append(episode_reward)
-            episode_reward = 0.0
-            obs, _ = env.reset()
-        else:
-            obs = next_obs
-
-    return states, actions, log_probs, rewards, episode_ends, values, next_values, episode_rewards, obs
+    return states, actions, log_probs, rewards, dones, terminateds, values, next_values, np.array(finished_ep_returns, dtype=np.float32), obs
 
 
-def compute_advantages(rewards, values, next_values, episode_ends, gamma=0.99, lam=0.95):
-    rewards = torch.tensor(rewards, dtype=torch.float32)
-    values = torch.stack(values).float()
-    next_values = torch.stack(next_values).float()
-    episode_ends = torch.tensor(episode_ends, dtype=torch.float32)
+def compute_advantages_vec(rewards, values, next_values, dones, terminateds, gamma=0.99, lam=0.95):
+    """
+    Vectorized GAE.
 
-    advantages = torch.zeros_like(values)
-    gae = 0.0
+    - `dones`: True for terminated OR truncated (used to reset GAE across episode boundaries)
+    - `terminateds`: True only for real terminals (used to disable bootstrap at terminal states)
+    """
+    rewards = rewards.float()
+    values = values.float()
+    next_values = next_values.float()
+    dones = dones.float()
+    terminateds = terminateds.float()
 
-    for t in reversed(range(len(rewards))):
-        mask = 1.0 - episode_ends[t]
-        delta = rewards[t] + gamma * next_values[t] * mask - values[t]
-        gae = delta + gamma * lam * mask * gae
+    T, N = rewards.shape
+    advantages = torch.zeros((T, N), dtype=torch.float32)
+    gae = torch.zeros((N,), dtype=torch.float32)
 
+    for t in reversed(range(T)):
+        gae_mask = 1.0 - dones[t]          # reset at episode end (terminated OR truncated)
+        boot_mask = 1.0 - terminateds[t]   # bootstrap if NOT a real terminal
+        delta = rewards[t] + gamma * next_values[t] * boot_mask - values[t]
+        gae = delta + gamma * lam * gae_mask * gae
         advantages[t] = gae
 
     returns = advantages + values
     advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
-
     return advantages, returns
 
 
 def ppo_update(
     model,
     optimizer,
-    states,
-    actions,
-    old_log_probs,
-    old_values,
-    advantages,
-    returns,
+    states,       # [B, obs_dim]
+    actions,      # [B]
+    old_log_probs,# [B]
+    old_values,   # [B]
+    advantages,   # [B]
+    returns,      # [B]
     ent_coef,
     epochs=10,
     batch_size=256,
@@ -157,10 +195,10 @@ def ppo_update(
     vf_coef=0.5,
 ):
     
-    states = torch.stack(states)
-    actions = torch.stack(actions)
-    old_log_probs = torch.stack(old_log_probs).detach()
-    old_values = torch.stack(old_values).detach()
+    states = states.detach()
+    actions = actions.detach()
+    old_log_probs = old_log_probs.detach()
+    old_values = old_values.detach()
     advantages = advantages.detach()
     returns = returns.detach()
 
@@ -248,16 +286,27 @@ def evaluate(model, obs_rms: RunningMeanStd, env_name="LunarLander-v3", episodes
 torch.manual_seed(0)
 np.random.seed(0)
 
-env = gym.wrappers.RecordEpisodeStatistics(gym.make("LunarLander-v3"))
-obs_dim = env.observation_space.shape[0]
-action_dim = env.action_space.n
+def make_env(env_id: str, seed: int):
+    def thunk():
+        env = gym.make(env_id)
+        env.reset(seed=seed)
+        return env
+    return thunk
+
+env_id = "LunarLander-v3"
+n_envs = 8
+rollout_steps = 256  # 256 * 8 = 2048 transitions per iteration
+
+envs = gym.vector.SyncVectorEnv([make_env(env_id, seed=1000 + i) for i in range(n_envs)])
+obs_dim = envs.single_observation_space.shape[0]
+action_dim = envs.single_action_space.n
 obs_rms = RunningMeanStd(shape=(obs_dim,))
 
 model = ActorCritic(obs_dim, action_dim)
 # PPO-style Adam eps helps stability a bit
 optimizer = torch.optim.Adam(model.parameters(), lr=3e-4, eps=1e-5)
 
-obs, _ = env.reset(seed=0)
+obs, _ = envs.reset(seed=[0 + i for i in range(n_envs)])
 best_eval = -float("inf")
 
 for iteration in range(1000):
@@ -267,16 +316,26 @@ for iteration in range(1000):
         actions,
         log_probs,
         rewards,
-        episode_ends,
+        dones,
+        terminateds,
         values,
         next_values,
         episode_rewards,
         obs,
-    ) = collect_rollout(model, env, obs, obs_rms=obs_rms, num_steps=2048)
+    ) = collect_rollout_vec(model, envs, obs, obs_rms=obs_rms, num_steps=rollout_steps)
 
-    advantages, returns = compute_advantages(
-        rewards, values, next_values, episode_ends, gamma=0.99, lam=0.95
+    advantages, returns = compute_advantages_vec(
+        rewards, values, next_values, dones, terminateds, gamma=0.99, lam=0.95
     )
+
+    # flatten [T, N, ...] -> [B, ...]
+    B = rollout_steps * n_envs
+    states_f = states.reshape(B, obs_dim)
+    actions_f = actions.reshape(B)
+    log_probs_f = log_probs.reshape(B)
+    values_f = values.reshape(B)
+    advantages_f = advantages.reshape(B)
+    returns_f = returns.reshape(B)
 
     # Light schedules; keeps learning stable later in training
     frac = 1.0 - iteration / 1000
@@ -288,16 +347,16 @@ for iteration in range(1000):
     mean_kl, num_updates = ppo_update(
         model,
         optimizer,
-        states,
-        actions,
-        log_probs,
-        values,
-        advantages,
-        returns,
+        states_f,
+        actions_f,
+        log_probs_f,
+        values_f,
+        advantages_f,
+        returns_f,
         ent_coef=ent_coef,
-        epochs=10,
+        epochs=4,
         batch_size=256,
-        clip=0.2,
+        clip=0.1,
     )
 
     roll_mean = float(np.mean(episode_rewards)) if len(episode_rewards) else float("nan")
