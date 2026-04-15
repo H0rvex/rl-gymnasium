@@ -35,6 +35,13 @@ class RunningMeanStd:
     def std(self):
         return np.sqrt(self.var + 1e-8)
 
+    def snapshot(self) -> "RunningMeanStd":
+        snap = RunningMeanStd(self.mean.shape, eps=0.0)
+        snap.mean = self.mean.copy()
+        snap.var = self.var.copy()
+        snap.count = float(self.count)
+        return snap
+
 
 def normalize_obs(obs: np.ndarray, rms: RunningMeanStd, clip=10.0) -> np.ndarray:
     obs = np.asarray(obs, dtype=np.float32)
@@ -337,10 +344,15 @@ for iteration in range(1000):
     advantages_f = advantages.reshape(B)
     returns_f = returns.reshape(B)
 
-    # Light schedules; keeps learning stable later in training
+    # Light schedules; keep exploration early, converge later
     frac = 1.0 - iteration / 1000
-    ent_coef = max(0.001, 0.01 * frac)
-    lr_now = 3e-4 * frac
+    if iteration < 300:
+        ent_coef = max(0.001, 0.01 * frac)
+    else:
+        ent_coef = max(0.0005, 0.005 * frac)
+
+    # Keep an LR floor so we can recover after performance dips
+    lr_now = max(1e-4, 3e-4 * frac)
     for pg in optimizer.param_groups:
         pg["lr"] = lr_now
 
@@ -354,9 +366,9 @@ for iteration in range(1000):
         advantages_f,
         returns_f,
         ent_coef=ent_coef,
-        epochs=4,
+        epochs=8,
         batch_size=256,
-        clip=0.1,
+        clip=0.2,
     )
 
     roll_mean = float(np.mean(episode_rewards)) if len(episode_rewards) else float("nan")
@@ -369,8 +381,10 @@ for iteration in range(1000):
     )
 
     if iteration % 10 == 0:
-        mean_eval_det, std_eval_det = evaluate(model, obs_rms=obs_rms, episodes=20, deterministic=True)
-        mean_eval_sto, std_eval_sto = evaluate(model, obs_rms=obs_rms, episodes=20, deterministic=False)
+        # Freeze normalization stats for consistent evaluation
+        obs_rms_eval = obs_rms.snapshot()
+        mean_eval_det, std_eval_det = evaluate(model, obs_rms=obs_rms_eval, episodes=20, deterministic=True)
+        mean_eval_sto, std_eval_sto = evaluate(model, obs_rms=obs_rms_eval, episodes=20, deterministic=False)
 
         print(f"Det eval: {mean_eval_det:.1f} ± {std_eval_det:.1f}")
         print(f"Sto eval: {mean_eval_sto:.1f} ± {std_eval_sto:.1f}")
