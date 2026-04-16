@@ -4,6 +4,7 @@ import numpy as np
 import gymnasium as gym
 import time
 from typing import Tuple
+import argparse
 import csv
 from pathlib import Path
 
@@ -292,8 +293,15 @@ def evaluate(model, obs_rms: RunningMeanStd, env_name="LunarLander-v3", episodes
     return np.mean(rewards), np.std(rewards)
 
 # setup
-torch.manual_seed(0)
-np.random.seed(0)
+parser = argparse.ArgumentParser()
+parser.add_argument("--seed", type=int, default=0,
+                    help="Random seed for torch / numpy / env reset")
+parser.add_argument("--iterations", type=int, default=1000,
+                    help="Number of PPO iterations to train for")
+args = parser.parse_args()
+
+torch.manual_seed(args.seed)
+np.random.seed(args.seed)
 
 def make_env(env_id: str, seed: int):
     def thunk():
@@ -306,7 +314,7 @@ env_id = "LunarLander-v3"
 n_envs = 8
 rollout_steps = 256  # 256 * 8 = 2048 transitions per iteration
 
-envs = gym.vector.SyncVectorEnv([make_env(env_id, seed=1000 + i) for i in range(n_envs)])
+envs = gym.vector.SyncVectorEnv([make_env(env_id, seed=1000 + args.seed * 1000 + i) for i in range(n_envs)])
 obs_dim = envs.single_observation_space.shape[0]
 action_dim = envs.single_action_space.n
 obs_rms = RunningMeanStd(shape=(obs_dim,))
@@ -315,10 +323,10 @@ model = ActorCritic(obs_dim, action_dim)
 # PPO-style Adam eps helps stability a bit
 optimizer = torch.optim.Adam(model.parameters(), lr=3e-4, eps=1e-5)
 
-obs, _ = envs.reset(seed=[0 + i for i in range(n_envs)])
+obs, _ = envs.reset(seed=[args.seed * 1000 + i for i in range(n_envs)])
 best_eval = -float("inf")
 
-log_path = Path(__file__).with_name("metrics.csv")
+log_path = Path(__file__).with_name(f"metrics_seed{args.seed}.csv")
 fieldnames = [
     "iteration",
     "env_steps",
@@ -340,7 +348,7 @@ with log_path.open("w", newline="", encoding="utf-8") as f:
     writer = csv.DictWriter(f, fieldnames=fieldnames)
     writer.writeheader()
 
-    for iteration in range(1000):
+    for iteration in range(args.iterations):
         t0 = time.time()
         (
             states,
@@ -369,7 +377,7 @@ with log_path.open("w", newline="", encoding="utf-8") as f:
         returns_f = returns.reshape(B)
 
         # Light schedules; keep exploration early, converge later
-        frac = 1.0 - iteration / 1000
+        frac = 1.0 - iteration / args.iterations
         if iteration < 300:
             ent_coef = max(0.001, 0.01 * frac)
         else:
@@ -420,8 +428,9 @@ with log_path.open("w", newline="", encoding="utf-8") as f:
             
             if mean_eval_det > best_eval:
                 best_eval = mean_eval_det
-                torch.save(model.state_dict(), "best_ppo_lunarlander.pt")
-                print(f"New best model saved with eval reward {best_eval:.1f}")
+                ckpt_path = Path(__file__).with_name(f"best_ppo_lunarlander_seed{args.seed}.pt")
+                torch.save(model.state_dict(), ckpt_path)
+                print(f"New best model saved with eval reward {best_eval:.1f} -> {ckpt_path.name}")
 
         writer.writerow(
             {
@@ -442,3 +451,4 @@ with log_path.open("w", newline="", encoding="utf-8") as f:
             }
         )
         f.flush()
+
