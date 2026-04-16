@@ -37,6 +37,17 @@ python scripts/plot_csv.py --csv ppo/metrics.csv --ys eval_det_mean,eval_sto_mea
 python scripts/plot_csv.py --csv ppo/metrics.csv --ys rollout_ep_ret_mean
 ```
 
+Export PNGs:
+
+```bash
+python scripts/plot_csv.py --csv ppo/metrics.csv --ys eval_det_mean,eval_sto_mean --out ppo/plots/eval_curves.png
+python scripts/plot_csv.py --csv ppo/metrics.csv --ys rollout_ep_ret_mean --out ppo/plots/rollout_return.png
+```
+
+### Training curves
+![Evaluation curves](plots/eval_curves.png)
+![Rollout return](plots/rollout_return.png)
+
 ### Latest run snapshot
 - Consistently solved LunarLander by end of training.
 - Example late-run eval:
