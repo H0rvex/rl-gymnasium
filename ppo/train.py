@@ -4,6 +4,8 @@ import numpy as np
 import gymnasium as gym
 import time
 from typing import Tuple
+import csv
+from pathlib import Path
 
 
 class RunningMeanStd:
@@ -316,81 +318,127 @@ optimizer = torch.optim.Adam(model.parameters(), lr=3e-4, eps=1e-5)
 obs, _ = envs.reset(seed=[0 + i for i in range(n_envs)])
 best_eval = -float("inf")
 
-for iteration in range(1000):
-    t0 = time.time()
-    (
-        states,
-        actions,
-        log_probs,
-        rewards,
-        dones,
-        terminateds,
-        values,
-        next_values,
-        episode_rewards,
-        obs,
-    ) = collect_rollout_vec(model, envs, obs, obs_rms=obs_rms, num_steps=rollout_steps)
+log_path = Path(__file__).with_name("metrics.csv")
+fieldnames = [
+    "iteration",
+    "env_steps",
+    "dt_sec",
+    "lr",
+    "ent_coef",
+    "approx_kl",
+    "updates",
+    "rollout_ep_ret_mean",
+    "rollout_ep_ret_n",
+    "eval_det_mean",
+    "eval_det_std",
+    "eval_sto_mean",
+    "eval_sto_std",
+    "best_eval_det",
+]
 
-    advantages, returns = compute_advantages_vec(
-        rewards, values, next_values, dones, terminateds, gamma=0.99, lam=0.95
-    )
+with log_path.open("w", newline="", encoding="utf-8") as f:
+    writer = csv.DictWriter(f, fieldnames=fieldnames)
+    writer.writeheader()
 
-    # flatten [T, N, ...] -> [B, ...]
-    B = rollout_steps * n_envs
-    states_f = states.reshape(B, obs_dim)
-    actions_f = actions.reshape(B)
-    log_probs_f = log_probs.reshape(B)
-    values_f = values.reshape(B)
-    advantages_f = advantages.reshape(B)
-    returns_f = returns.reshape(B)
+    for iteration in range(1000):
+        t0 = time.time()
+        (
+            states,
+            actions,
+            log_probs,
+            rewards,
+            dones,
+            terminateds,
+            values,
+            next_values,
+            episode_rewards,
+            obs,
+        ) = collect_rollout_vec(model, envs, obs, obs_rms=obs_rms, num_steps=rollout_steps)
 
-    # Light schedules; keep exploration early, converge later
-    frac = 1.0 - iteration / 1000
-    if iteration < 300:
-        ent_coef = max(0.001, 0.01 * frac)
-    else:
-        ent_coef = max(0.0005, 0.005 * frac)
+        advantages, returns = compute_advantages_vec(
+            rewards, values, next_values, dones, terminateds, gamma=0.99, lam=0.95
+        )
 
-    # Keep an LR floor so we can recover after performance dips
-    lr_now = max(1e-4, 3e-4 * frac)
-    for pg in optimizer.param_groups:
-        pg["lr"] = lr_now
+        # flatten [T, N, ...] -> [B, ...]
+        B = rollout_steps * n_envs
+        states_f = states.reshape(B, obs_dim)
+        actions_f = actions.reshape(B)
+        log_probs_f = log_probs.reshape(B)
+        values_f = values.reshape(B)
+        advantages_f = advantages.reshape(B)
+        returns_f = returns.reshape(B)
 
-    mean_kl, num_updates = ppo_update(
-        model,
-        optimizer,
-        states_f,
-        actions_f,
-        log_probs_f,
-        values_f,
-        advantages_f,
-        returns_f,
-        ent_coef=ent_coef,
-        epochs=8,
-        batch_size=256,
-        clip=0.2,
-    )
+        # Light schedules; keep exploration early, converge later
+        frac = 1.0 - iteration / 1000
+        if iteration < 300:
+            ent_coef = max(0.001, 0.01 * frac)
+        else:
+            ent_coef = max(0.0005, 0.005 * frac)
 
-    roll_mean = float(np.mean(episode_rewards)) if len(episode_rewards) else float("nan")
-    roll_n = len(episode_rewards)
-    dt = time.time() - t0
-    print(
-        f"it {iteration:04d} | dt {dt:5.2f}s | lr {lr_now:.2e} | "
-        f"KL {mean_kl:.5f} | updates {num_updates:3d} | "
-        f"rollout_ep_ret {roll_mean:7.1f} ({roll_n} eps)"
-    )
+        # Keep an LR floor so we can recover after performance dips
+        lr_now = max(1e-4, 3e-4 * frac)
+        for pg in optimizer.param_groups:
+            pg["lr"] = lr_now
 
-    if iteration % 10 == 0:
-        # Freeze normalization stats for consistent evaluation
-        obs_rms_eval = obs_rms.snapshot()
-        mean_eval_det, std_eval_det = evaluate(model, obs_rms=obs_rms_eval, episodes=20, deterministic=True)
-        mean_eval_sto, std_eval_sto = evaluate(model, obs_rms=obs_rms_eval, episodes=20, deterministic=False)
+        mean_kl, num_updates = ppo_update(
+            model,
+            optimizer,
+            states_f,
+            actions_f,
+            log_probs_f,
+            values_f,
+            advantages_f,
+            returns_f,
+            ent_coef=ent_coef,
+            epochs=8,
+            batch_size=256,
+            clip=0.2,
+        )
 
-        print(f"Det eval: {mean_eval_det:.1f} ± {std_eval_det:.1f}")
-        print(f"Sto eval: {mean_eval_sto:.1f} ± {std_eval_sto:.1f}")
-        
-        if mean_eval_det > best_eval:
-            best_eval = mean_eval_det
-            torch.save(model.state_dict(), "best_ppo_lunarlander.pt")
-            print(f"New best model saved with eval reward {best_eval:.1f}")
+        roll_mean = float(np.mean(episode_rewards)) if len(episode_rewards) else float("nan")
+        roll_n = len(episode_rewards)
+        dt = time.time() - t0
+        print(
+            f"it {iteration:04d} | dt {dt:5.2f}s | lr {lr_now:.2e} | "
+            f"KL {mean_kl:.5f} | updates {num_updates:3d} | "
+            f"rollout_ep_ret {roll_mean:7.1f} ({roll_n} eps)"
+        )
+
+        mean_eval_det = float("nan")
+        std_eval_det = float("nan")
+        mean_eval_sto = float("nan")
+        std_eval_sto = float("nan")
+
+        if iteration % 10 == 0:
+            # Freeze normalization stats for consistent evaluation
+            obs_rms_eval = obs_rms.snapshot()
+            mean_eval_det, std_eval_det = evaluate(model, obs_rms=obs_rms_eval, episodes=20, deterministic=True)
+            mean_eval_sto, std_eval_sto = evaluate(model, obs_rms=obs_rms_eval, episodes=20, deterministic=False)
+
+            print(f"Det eval: {mean_eval_det:.1f} ± {std_eval_det:.1f}")
+            print(f"Sto eval: {mean_eval_sto:.1f} ± {std_eval_sto:.1f}")
             
+            if mean_eval_det > best_eval:
+                best_eval = mean_eval_det
+                torch.save(model.state_dict(), "best_ppo_lunarlander.pt")
+                print(f"New best model saved with eval reward {best_eval:.1f}")
+
+        writer.writerow(
+            {
+                "iteration": iteration,
+                "env_steps": (iteration + 1) * rollout_steps * n_envs,
+                "dt_sec": dt,
+                "lr": lr_now,
+                "ent_coef": ent_coef,
+                "approx_kl": mean_kl,
+                "updates": num_updates,
+                "rollout_ep_ret_mean": roll_mean,
+                "rollout_ep_ret_n": roll_n,
+                "eval_det_mean": mean_eval_det,
+                "eval_det_std": std_eval_det,
+                "eval_sto_mean": mean_eval_sto,
+                "eval_sto_std": std_eval_sto,
+                "best_eval_det": best_eval,
+            }
+        )
+        f.flush()

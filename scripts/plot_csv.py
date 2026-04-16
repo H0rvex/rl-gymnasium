@@ -60,7 +60,11 @@ def main():
         if yk not in cols:
             raise SystemExit(f"Missing y column '{yk}'. Columns: {list(cols.keys())}")
         y = to_float(cols[yk])
-        plt.plot(x, y, label=yk)
+        mask = np.isfinite(x) & np.isfinite(y)
+        if not np.any(mask):
+            raise SystemExit(f"No finite points to plot for '{yk}'.")
+        # Use markers so sparse series (e.g. eval every N iters) still show up.
+        plt.plot(x[mask], y[mask], marker="o", markersize=3, linewidth=1.2, label=yk)
 
     plt.title(csv_path.name)
     plt.xlabel(args.x)
