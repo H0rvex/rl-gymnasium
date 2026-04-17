@@ -84,9 +84,11 @@ def collect_rollout_vec(
     obs: np.ndarray,
     obs_rms: RunningMeanStd,
     num_steps: int,
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, np.ndarray, np.ndarray]:
+    device: torch.device,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, np.ndarray, np.ndarray]:
     """
-    Collect a rollout from vectorized environments.
+    Collect a rollout from vectorized environments. Rollout buffers stay on CPU;
+    only the model forward runs on `device`.
 
     Returns tensors with shape [T, N, ...] (except episode return list).
     """
@@ -111,7 +113,9 @@ def collect_rollout_vec(
         obs_tensor = torch.tensor(obs_n, dtype=torch.float32)
 
         with torch.no_grad():
-            logits, value = model(obs_tensor)
+            logits, value = model(obs_tensor.to(device))
+        logits = logits.cpu()
+        value = value.cpu()
 
         dist = torch.distributions.Categorical(logits=logits)
         action = dist.sample()
@@ -136,8 +140,8 @@ def collect_rollout_vec(
         next_obs_n = normalize_obs(next_obs_for_value, obs_rms)
         next_obs_tensor = torch.tensor(next_obs_n, dtype=torch.float32)
         with torch.no_grad():
-            _, next_value = model(next_obs_tensor)
-        next_value = next_value * torch.tensor(1.0 - terminated.astype(np.float32))
+            _, next_value = model(next_obs_tensor.to(device))
+        next_value = next_value.cpu() * torch.tensor(1.0 - terminated.astype(np.float32))
 
         states[t] = obs_tensor
         actions[t] = action
@@ -198,19 +202,19 @@ def ppo_update(
     old_values,   # [B]
     advantages,   # [B]
     returns,      # [B]
+    device: torch.device,
     ent_coef,
     epochs=10,
     batch_size=256,
     clip=0.2,
     vf_coef=0.5,
 ):
-    
-    states = states.detach()
-    actions = actions.detach()
-    old_log_probs = old_log_probs.detach()
-    old_values = old_values.detach()
-    advantages = advantages.detach()
-    returns = returns.detach()
+    states = states.detach().to(device)
+    actions = actions.detach().to(device)
+    old_log_probs = old_log_probs.detach().to(device)
+    old_values = old_values.detach().to(device)
+    advantages = advantages.detach().to(device)
+    returns = returns.detach().to(device)
 
     n = states.size(0)
 
@@ -218,7 +222,7 @@ def ppo_update(
     num_updates = 0
 
     for _ in range(epochs):
-        indices = torch.randperm(n)
+        indices = torch.randperm(n, device=device)
         stop_early = False
 
         for start in range(0, n, batch_size):
@@ -256,13 +260,15 @@ def ppo_update(
             if approx_kl > 0.015:
                 stop_early = True
                 break
-        
+
         if stop_early:
             break
-    
+
     return np.mean(kl_values), num_updates
 
-def evaluate(model, obs_rms: RunningMeanStd, env_name="LunarLander-v3", episodes=20, deterministic=True):
+
+def evaluate(model, obs_rms: RunningMeanStd, device: torch.device,
+             env_name="LunarLander-v3", episodes=20, deterministic=True):
     env = gym.make(env_name)
     rewards = []
 
@@ -273,7 +279,7 @@ def evaluate(model, obs_rms: RunningMeanStd, env_name="LunarLander-v3", episodes
 
         while not done:
             obs_n = normalize_obs(obs, obs_rms)
-            obs_tensor = torch.tensor(obs_n, dtype=torch.float32)
+            obs_tensor = torch.tensor(obs_n, dtype=torch.float32).to(device)
             with torch.no_grad():
                 logits, _ = model(obs_tensor)
 
@@ -282,173 +288,195 @@ def evaluate(model, obs_rms: RunningMeanStd, env_name="LunarLander-v3", episodes
             else:
                 dist = torch.distributions.Categorical(logits=logits)
                 action = dist.sample().item()
-                
+
             obs, reward, terminated, truncated, _ = env.step(action)
             done = terminated or truncated
             ep_reward += reward
-            
+
         rewards.append(ep_reward)
-    
+
     env.close()
     return np.mean(rewards), np.std(rewards)
 
-# setup
-parser = argparse.ArgumentParser()
-parser.add_argument("--seed", type=int, default=0,
-                    help="Random seed for torch / numpy / env reset")
-parser.add_argument("--iterations", type=int, default=1000,
-                    help="Number of PPO iterations to train for")
-args = parser.parse_args()
 
-torch.manual_seed(args.seed)
-np.random.seed(args.seed)
+def resolve_device(name: str) -> torch.device:
+    if name == "auto":
+        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    return torch.device(name)
 
-def make_env(env_id: str, seed: int):
-    def thunk():
-        env = gym.make(env_id)
-        env.reset(seed=seed)
-        return env
-    return thunk
 
-env_id = "LunarLander-v3"
-n_envs = 8
-rollout_steps = 256  # 256 * 8 = 2048 transitions per iteration
+def main(args: argparse.Namespace) -> None:
+    torch.manual_seed(args.seed)
+    np.random.seed(args.seed)
 
-envs = gym.vector.SyncVectorEnv([make_env(env_id, seed=1000 + args.seed * 1000 + i) for i in range(n_envs)])
-obs_dim = envs.single_observation_space.shape[0]
-action_dim = envs.single_action_space.n
-obs_rms = RunningMeanStd(shape=(obs_dim,))
+    device = resolve_device(args.device)
+    print(f"Training on device: {device}")
 
-model = ActorCritic(obs_dim, action_dim)
-# PPO-style Adam eps helps stability a bit
-optimizer = torch.optim.Adam(model.parameters(), lr=3e-4, eps=1e-5)
+    def make_env(env_id: str, seed: int):
+        def thunk():
+            env = gym.make(env_id)
+            env.reset(seed=seed)
+            return env
+        return thunk
 
-obs, _ = envs.reset(seed=[args.seed * 1000 + i for i in range(n_envs)])
-best_eval = -float("inf")
+    env_id = "LunarLander-v3"
+    n_envs = 8
+    rollout_steps = 256  # 256 * 8 = 2048 transitions per iteration
 
-log_path = Path(__file__).with_name(f"metrics_seed{args.seed}.csv")
-fieldnames = [
-    "iteration",
-    "env_steps",
-    "dt_sec",
-    "lr",
-    "ent_coef",
-    "approx_kl",
-    "updates",
-    "rollout_ep_ret_mean",
-    "rollout_ep_ret_n",
-    "eval_det_mean",
-    "eval_det_std",
-    "eval_sto_mean",
-    "eval_sto_std",
-    "best_eval_det",
-]
+    envs = gym.vector.SyncVectorEnv([make_env(env_id, seed=1000 + args.seed * 1000 + i) for i in range(n_envs)])
+    obs_dim = envs.single_observation_space.shape[0]
+    action_dim = envs.single_action_space.n
+    obs_rms = RunningMeanStd(shape=(obs_dim,))
 
-with log_path.open("w", newline="", encoding="utf-8") as f:
-    writer = csv.DictWriter(f, fieldnames=fieldnames)
-    writer.writeheader()
+    model = ActorCritic(obs_dim, action_dim).to(device)
+    # PPO-style Adam eps helps stability a bit
+    optimizer = torch.optim.Adam(model.parameters(), lr=3e-4, eps=1e-5)
 
-    for iteration in range(args.iterations):
-        t0 = time.time()
-        (
-            states,
-            actions,
-            log_probs,
-            rewards,
-            dones,
-            terminateds,
-            values,
-            next_values,
-            episode_rewards,
-            obs,
-        ) = collect_rollout_vec(model, envs, obs, obs_rms=obs_rms, num_steps=rollout_steps)
+    obs, _ = envs.reset(seed=[args.seed * 1000 + i for i in range(n_envs)])
+    best_eval = -float("inf")
 
-        advantages, returns = compute_advantages_vec(
-            rewards, values, next_values, dones, terminateds, gamma=0.99, lam=0.95
-        )
+    log_path = Path(__file__).with_name(f"metrics_seed{args.seed}.csv")
+    fieldnames = [
+        "iteration",
+        "env_steps",
+        "dt_sec",
+        "lr",
+        "ent_coef",
+        "approx_kl",
+        "updates",
+        "rollout_ep_ret_mean",
+        "rollout_ep_ret_n",
+        "eval_det_mean",
+        "eval_det_std",
+        "eval_sto_mean",
+        "eval_sto_std",
+        "best_eval_det",
+    ]
 
-        # flatten [T, N, ...] -> [B, ...]
-        B = rollout_steps * n_envs
-        states_f = states.reshape(B, obs_dim)
-        actions_f = actions.reshape(B)
-        log_probs_f = log_probs.reshape(B)
-        values_f = values.reshape(B)
-        advantages_f = advantages.reshape(B)
-        returns_f = returns.reshape(B)
+    with log_path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
 
-        # Light schedules; keep exploration early, converge later
-        frac = 1.0 - iteration / args.iterations
-        if iteration < 300:
-            ent_coef = max(0.001, 0.01 * frac)
-        else:
-            ent_coef = max(0.0005, 0.005 * frac)
+        for iteration in range(args.iterations):
+            t0 = time.time()
+            (
+                states,
+                actions,
+                log_probs,
+                rewards,
+                dones,
+                terminateds,
+                values,
+                next_values,
+                episode_rewards,
+                obs,
+            ) = collect_rollout_vec(model, envs, obs, obs_rms=obs_rms,
+                                    num_steps=rollout_steps, device=device)
 
-        # Keep an LR floor so we can recover after performance dips
-        lr_now = max(1e-4, 3e-4 * frac)
-        for pg in optimizer.param_groups:
-            pg["lr"] = lr_now
+            advantages, returns = compute_advantages_vec(
+                rewards, values, next_values, dones, terminateds, gamma=0.99, lam=0.95
+            )
 
-        mean_kl, num_updates = ppo_update(
-            model,
-            optimizer,
-            states_f,
-            actions_f,
-            log_probs_f,
-            values_f,
-            advantages_f,
-            returns_f,
-            ent_coef=ent_coef,
-            epochs=8,
-            batch_size=256,
-            clip=0.2,
-        )
+            # flatten [T, N, ...] -> [B, ...]
+            B = rollout_steps * n_envs
+            states_f = states.reshape(B, obs_dim)
+            actions_f = actions.reshape(B)
+            log_probs_f = log_probs.reshape(B)
+            values_f = values.reshape(B)
+            advantages_f = advantages.reshape(B)
+            returns_f = returns.reshape(B)
 
-        roll_mean = float(np.mean(episode_rewards)) if len(episode_rewards) else float("nan")
-        roll_n = len(episode_rewards)
-        dt = time.time() - t0
-        print(
-            f"it {iteration:04d} | dt {dt:5.2f}s | lr {lr_now:.2e} | "
-            f"KL {mean_kl:.5f} | updates {num_updates:3d} | "
-            f"rollout_ep_ret {roll_mean:7.1f} ({roll_n} eps)"
-        )
+            # Light schedules; keep exploration early, converge later
+            frac = 1.0 - iteration / args.iterations
+            if iteration < 300:
+                ent_coef = max(0.001, 0.01 * frac)
+            else:
+                ent_coef = max(0.0005, 0.005 * frac)
 
-        mean_eval_det = float("nan")
-        std_eval_det = float("nan")
-        mean_eval_sto = float("nan")
-        std_eval_sto = float("nan")
+            # Keep an LR floor so we can recover after performance dips
+            lr_now = max(1e-4, 3e-4 * frac)
+            for pg in optimizer.param_groups:
+                pg["lr"] = lr_now
 
-        if iteration % 10 == 0:
-            # Freeze normalization stats for consistent evaluation
-            obs_rms_eval = obs_rms.snapshot()
-            mean_eval_det, std_eval_det = evaluate(model, obs_rms=obs_rms_eval, episodes=20, deterministic=True)
-            mean_eval_sto, std_eval_sto = evaluate(model, obs_rms=obs_rms_eval, episodes=20, deterministic=False)
+            mean_kl, num_updates = ppo_update(
+                model,
+                optimizer,
+                states_f,
+                actions_f,
+                log_probs_f,
+                values_f,
+                advantages_f,
+                returns_f,
+                device=device,
+                ent_coef=ent_coef,
+                epochs=8,
+                batch_size=256,
+                clip=0.2,
+            )
 
-            print(f"Det eval: {mean_eval_det:.1f} ± {std_eval_det:.1f}")
-            print(f"Sto eval: {mean_eval_sto:.1f} ± {std_eval_sto:.1f}")
-            
-            if mean_eval_det > best_eval:
-                best_eval = mean_eval_det
-                ckpt_path = Path(__file__).with_name(f"best_ppo_lunarlander_seed{args.seed}.pt")
-                torch.save(model.state_dict(), ckpt_path)
-                print(f"New best model saved with eval reward {best_eval:.1f} -> {ckpt_path.name}")
+            roll_mean = float(np.mean(episode_rewards)) if len(episode_rewards) else float("nan")
+            roll_n = len(episode_rewards)
+            dt = time.time() - t0
+            print(
+                f"it {iteration:04d} | dt {dt:5.2f}s | lr {lr_now:.2e} | "
+                f"KL {mean_kl:.5f} | updates {num_updates:3d} | "
+                f"rollout_ep_ret {roll_mean:7.1f} ({roll_n} eps)"
+            )
 
-        writer.writerow(
-            {
-                "iteration": iteration,
-                "env_steps": (iteration + 1) * rollout_steps * n_envs,
-                "dt_sec": dt,
-                "lr": lr_now,
-                "ent_coef": ent_coef,
-                "approx_kl": mean_kl,
-                "updates": num_updates,
-                "rollout_ep_ret_mean": roll_mean,
-                "rollout_ep_ret_n": roll_n,
-                "eval_det_mean": mean_eval_det,
-                "eval_det_std": std_eval_det,
-                "eval_sto_mean": mean_eval_sto,
-                "eval_sto_std": std_eval_sto,
-                "best_eval_det": best_eval,
-            }
-        )
-        f.flush()
+            mean_eval_det = float("nan")
+            std_eval_det = float("nan")
+            mean_eval_sto = float("nan")
+            std_eval_sto = float("nan")
 
+            if iteration % 10 == 0:
+                # Freeze normalization stats for consistent evaluation
+                obs_rms_eval = obs_rms.snapshot()
+                mean_eval_det, std_eval_det = evaluate(model, obs_rms=obs_rms_eval,
+                                                      device=device, episodes=20, deterministic=True)
+                mean_eval_sto, std_eval_sto = evaluate(model, obs_rms=obs_rms_eval,
+                                                      device=device, episodes=20, deterministic=False)
+
+                print(f"Det eval: {mean_eval_det:.1f} ± {std_eval_det:.1f}")
+                print(f"Sto eval: {mean_eval_sto:.1f} ± {std_eval_sto:.1f}")
+
+                if mean_eval_det > best_eval:
+                    best_eval = mean_eval_det
+                    ckpt_path = Path(__file__).with_name(f"best_ppo_lunarlander_seed{args.seed}.pt")
+                    torch.save(model.state_dict(), ckpt_path)
+                    print(f"New best model saved with eval reward {best_eval:.1f} -> {ckpt_path.name}")
+
+            writer.writerow(
+                {
+                    "iteration": iteration,
+                    "env_steps": (iteration + 1) * rollout_steps * n_envs,
+                    "dt_sec": dt,
+                    "lr": lr_now,
+                    "ent_coef": ent_coef,
+                    "approx_kl": mean_kl,
+                    "updates": num_updates,
+                    "rollout_ep_ret_mean": roll_mean,
+                    "rollout_ep_ret_n": roll_n,
+                    "eval_det_mean": mean_eval_det,
+                    "eval_det_std": std_eval_det,
+                    "eval_sto_mean": mean_eval_sto,
+                    "eval_sto_std": std_eval_sto,
+                    "best_eval_det": best_eval,
+                }
+            )
+            f.flush()
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--seed", type=int, default=0,
+                        help="Random seed for torch / numpy / env reset")
+    parser.add_argument("--iterations", type=int, default=1000,
+                        help="Number of PPO iterations to train for")
+    parser.add_argument("--device", type=str, default="auto",
+                        choices=["auto", "cpu", "cuda"],
+                        help="Compute device. 'auto' picks cuda if available, else cpu.")
+    return parser.parse_args()
+
+
+if __name__ == "__main__":
+    main(parse_args())
