@@ -178,12 +178,14 @@ def collect_rollout_vec(
         done = np.logical_or(terminated, truncated)
 
         # For bootstrap, we want V(s_{t+1}) based on the *real* next state.
-        # Some Gymnasium vector envs autoreset and return the reset observation in `next_obs`
-        # while providing terminal observations in `infos["final_observation"]`.
+        # Under SAME_STEP autoreset, gym.vector returns the reset observation in
+        # `next_obs` and stores the true terminal observation in `infos["final_obs"]`
+        # (renamed from `final_observation` in Gymnasium 1.0). `_final_obs` is the
+        # boolean mask of which sub-envs produced a final obs on this step.
         next_obs_for_value = next_obs
-        if isinstance(infos, dict) and "final_observation" in infos:
-            final_mask = infos.get("_final_observation", done)
-            final_obs = infos["final_observation"]
+        if isinstance(infos, dict) and "final_obs" in infos:
+            final_mask = infos.get("_final_obs", done)
+            final_obs = infos["final_obs"]
             if np.any(final_mask):
                 next_obs_for_value = np.array(next_obs, copy=True)
                 for i in np.where(final_mask)[0]:
@@ -387,8 +389,13 @@ def main(args: argparse.Namespace) -> None:
             return env
         return thunk
 
+    # SAME_STEP autoreset (the old default) matches collect_rollout_vec's
+    # `infos["final_observation"]` bootstrap path. Gymnasium >=1.0 defaults
+    # to NEXT_STEP, which silently injects a corrupt (terminal_obs, ignored
+    # action, reward=0, next_obs=reset_obs, done=False) transition per episode.
     envs = gym.vector.SyncVectorEnv(
-        [make_env(cfg.env_id, seed=1000 + args.seed * 1000 + i) for i in range(cfg.n_envs)]
+        [make_env(cfg.env_id, seed=1000 + args.seed * 1000 + i) for i in range(cfg.n_envs)],
+        autoreset_mode=gym.vector.AutoresetMode.SAME_STEP,
     )
     obs_dim = envs.single_observation_space.shape[0]
     action_dim = envs.single_action_space.n
