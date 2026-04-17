@@ -1,6 +1,8 @@
 # PPO on LunarLander-v3
 
-From-scratch Proximal Policy Optimization in PyTorch + Gymnasium. Solves LunarLander-v3 in ~2M environment steps with consistent ~225 deterministic eval reward across seeds.
+From-scratch Proximal Policy Optimization in PyTorch + Gymnasium. Solves LunarLander-v3 in ~2M environment steps with consistent ~257 deterministic eval reward across 3 seeds.
+
+![Trained agent landing](plots/rollout.gif)
 
 ![Evaluation curves](plots/eval_curves.png)
 
@@ -63,6 +65,10 @@ Trained over 3 seeds (`0`, `1`, `2`) on CPU. Mean ± std across seeds (last 10 e
 LunarLander-v3 is considered solved at 200+. All 3 seeds converge reliably above 240 by iteration ~400.
 
 ![Rollout return (smoothed)](plots/rollout_return.png)
+
+## Hardware & runtime
+
+Tested on Python 3.12, torch 2.7.1+cu118. Training runs CPU-only by default (`SyncVectorEnv` is the bottleneck, not the tiny network). Wallclock ~41 min per seed on a modern CPU; GPU provides no meaningful speedup here. Pass `--device cuda` to use GPU — relevant once you scale to MuJoCo.
 
 ## Reproducing
 

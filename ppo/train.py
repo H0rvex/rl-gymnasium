@@ -3,19 +3,73 @@ import torch.nn as nn
 import numpy as np
 import gymnasium as gym
 import time
+from dataclasses import dataclass
 from typing import Tuple
 import argparse
 import csv
 from pathlib import Path
 
 
+@dataclass
+class TrainConfig:
+    # Environment
+    env_id: str = "LunarLander-v3"
+    n_envs: int = 8
+    rollout_steps: int = 256        # per env; total batch = n_envs * rollout_steps
+
+    # Network
+    hidden_dim: int = 64
+
+    # PPO
+    gamma: float = 0.99
+    lam: float = 0.95
+    clip: float = 0.2
+    vf_coef: float = 0.5
+    epochs: int = 8
+    batch_size: int = 256
+    grad_clip: float = 0.5
+    kl_threshold: float = 0.015
+
+    # Optimizer
+    lr: float = 3e-4
+    lr_floor: float = 1e-4
+    adam_eps: float = 1e-5
+
+    # Entropy schedule: high → low at iter ent_switch, floor applied throughout
+    ent_coef_early: float = 0.01
+    ent_coef_late: float = 0.005
+    ent_floor_early: float = 0.001
+    ent_floor_late: float = 0.0005
+    ent_switch: int = 300           # iteration at which late schedule kicks in
+
+    # Evaluation
+    eval_interval: int = 10
+    eval_episodes: int = 20
+    obs_clip: float = 10.0
+
+
+# Type alias for collect_rollout_vec return
+RolloutBatch = Tuple[
+    torch.Tensor,   # states      [T, N, obs_dim]
+    torch.Tensor,   # actions     [T, N]
+    torch.Tensor,   # log_probs   [T, N]
+    torch.Tensor,   # rewards     [T, N]
+    torch.Tensor,   # dones       [T, N]
+    torch.Tensor,   # terminateds [T, N]
+    torch.Tensor,   # values      [T, N]
+    torch.Tensor,   # next_values [T, N]
+    np.ndarray,     # finished episode returns
+    np.ndarray,     # next obs (for continuing rollout)
+]
+
+
 class RunningMeanStd:
-    def __init__(self, shape, eps=1e-4):
+    def __init__(self, shape: Tuple[int, ...], eps: float = 1e-4) -> None:
         self.mean = np.zeros(shape, dtype=np.float64)
         self.var = np.ones(shape, dtype=np.float64)
         self.count = eps
 
-    def update(self, x: np.ndarray):
+    def update(self, x: np.ndarray) -> None:
         x = np.asarray(x, dtype=np.float64)
         batch_mean = x.mean(axis=0)
         batch_var = x.var(axis=0)
@@ -35,7 +89,7 @@ class RunningMeanStd:
         self.count = tot_count
 
     @property
-    def std(self):
+    def std(self) -> np.ndarray:
         return np.sqrt(self.var + 1e-8)
 
     def snapshot(self) -> "RunningMeanStd":
@@ -46,33 +100,33 @@ class RunningMeanStd:
         return snap
 
 
-def normalize_obs(obs: np.ndarray, rms: RunningMeanStd, clip=10.0) -> np.ndarray:
+def normalize_obs(obs: np.ndarray, rms: RunningMeanStd, clip: float = 10.0) -> np.ndarray:
     obs = np.asarray(obs, dtype=np.float32)
     obs = (obs - rms.mean.astype(np.float32)) / rms.std.astype(np.float32)
     return np.clip(obs, -clip, clip)
 
 
 class ActorCritic(nn.Module):
-    def __init__(self, obs_dim, action_dim):
+    def __init__(self, obs_dim: int, action_dim: int, hidden_dim: int = 64) -> None:
         super().__init__()
 
         self.actor = nn.Sequential(
-            nn.Linear(obs_dim, 64),
+            nn.Linear(obs_dim, hidden_dim),
             nn.Tanh(),
-            nn.Linear(64, 64),
+            nn.Linear(hidden_dim, hidden_dim),
             nn.Tanh(),
-            nn.Linear(64, action_dim),
+            nn.Linear(hidden_dim, action_dim),
         )
 
         self.critic = nn.Sequential(
-            nn.Linear(obs_dim, 64),
+            nn.Linear(obs_dim, hidden_dim),
             nn.Tanh(),
-            nn.Linear(64, 64),
+            nn.Linear(hidden_dim, hidden_dim),
             nn.Tanh(),
-            nn.Linear(64, 1),
+            nn.Linear(hidden_dim, 1),
         )
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         logits = self.actor(x)
         value = self.critic(x).squeeze(-1)
         return logits, value
@@ -84,11 +138,12 @@ def collect_rollout_vec(
     obs: np.ndarray,
     obs_rms: RunningMeanStd,
     num_steps: int,
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, np.ndarray, np.ndarray]:
+    device: torch.device,
+    cfg: TrainConfig,
+) -> RolloutBatch:
     """
-    Collect a rollout from vectorized environments.
-
-    Returns tensors with shape [T, N, ...] (except episode return list).
+    Collect a rollout from vectorized environments. Rollout buffers stay on CPU;
+    only the model forward runs on `device`.
     """
     n_envs = obs.shape[0]
     obs_dim = obs.shape[1]
@@ -103,15 +158,17 @@ def collect_rollout_vec(
     next_values = torch.zeros((num_steps, n_envs), dtype=torch.float32)
 
     ep_returns = np.zeros((n_envs,), dtype=np.float32)
-    finished_ep_returns = []
+    finished_ep_returns: list[float] = []
 
     for t in range(num_steps):
         obs_rms.update(obs)
-        obs_n = normalize_obs(obs, obs_rms)
+        obs_n = normalize_obs(obs, obs_rms, clip=cfg.obs_clip)
         obs_tensor = torch.tensor(obs_n, dtype=torch.float32)
 
         with torch.no_grad():
-            logits, value = model(obs_tensor)
+            logits, value = model(obs_tensor.to(device))
+        logits = logits.cpu()
+        value = value.cpu()
 
         dist = torch.distributions.Categorical(logits=logits)
         action = dist.sample()
@@ -133,11 +190,11 @@ def collect_rollout_vec(
                     next_obs_for_value[i] = np.asarray(final_obs[i], dtype=next_obs.dtype)
 
         obs_rms.update(next_obs_for_value)
-        next_obs_n = normalize_obs(next_obs_for_value, obs_rms)
+        next_obs_n = normalize_obs(next_obs_for_value, obs_rms, clip=cfg.obs_clip)
         next_obs_tensor = torch.tensor(next_obs_n, dtype=torch.float32)
         with torch.no_grad():
-            _, next_value = model(next_obs_tensor)
-        next_value = next_value * torch.tensor(1.0 - terminated.astype(np.float32))
+            _, next_value = model(next_obs_tensor.to(device))
+        next_value = next_value.cpu() * torch.tensor(1.0 - terminated.astype(np.float32))
 
         states[t] = obs_tensor
         actions[t] = action
@@ -157,10 +214,22 @@ def collect_rollout_vec(
         # Do NOT manually reset here. Vector envs handle resetting based on their autoreset mode.
         obs = next_obs
 
-    return states, actions, log_probs, rewards, dones, terminateds, values, next_values, np.array(finished_ep_returns, dtype=np.float32), obs
+    return (
+        states, actions, log_probs, rewards, dones, terminateds,
+        values, next_values,
+        np.array(finished_ep_returns, dtype=np.float32), obs,
+    )
 
 
-def compute_advantages_vec(rewards, values, next_values, dones, terminateds, gamma=0.99, lam=0.95):
+def compute_advantages_vec(
+    rewards: torch.Tensor,
+    values: torch.Tensor,
+    next_values: torch.Tensor,
+    dones: torch.Tensor,
+    terminateds: torch.Tensor,
+    gamma: float = 0.99,
+    lam: float = 0.95,
+) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Vectorized GAE.
 
@@ -190,39 +259,35 @@ def compute_advantages_vec(rewards, values, next_values, dones, terminateds, gam
 
 
 def ppo_update(
-    model,
-    optimizer,
-    states,       # [B, obs_dim]
-    actions,      # [B]
-    old_log_probs,# [B]
-    old_values,   # [B]
-    advantages,   # [B]
-    returns,      # [B]
-    ent_coef,
-    epochs=10,
-    batch_size=256,
-    clip=0.2,
-    vf_coef=0.5,
-):
-    
-    states = states.detach()
-    actions = actions.detach()
-    old_log_probs = old_log_probs.detach()
-    old_values = old_values.detach()
-    advantages = advantages.detach()
-    returns = returns.detach()
+    model: nn.Module,
+    optimizer: torch.optim.Optimizer,
+    states: torch.Tensor,
+    actions: torch.Tensor,
+    old_log_probs: torch.Tensor,
+    old_values: torch.Tensor,
+    advantages: torch.Tensor,
+    returns: torch.Tensor,
+    device: torch.device,
+    cfg: TrainConfig,
+    ent_coef: float,
+) -> Tuple[float, int]:
+    states = states.detach().to(device)
+    actions = actions.detach().to(device)
+    old_log_probs = old_log_probs.detach().to(device)
+    old_values = old_values.detach().to(device)
+    advantages = advantages.detach().to(device)
+    returns = returns.detach().to(device)
 
     n = states.size(0)
-
-    kl_values = []
+    kl_values: list[float] = []
     num_updates = 0
 
-    for _ in range(epochs):
-        indices = torch.randperm(n)
+    for _ in range(cfg.epochs):
+        indices = torch.randperm(n, device=device)
         stop_early = False
 
-        for start in range(0, n, batch_size):
-            mb_idx = indices[start:start + batch_size]
+        for start in range(0, n, cfg.batch_size):
+            mb_idx = indices[start:start + cfg.batch_size]
 
             logits, values = model(states[mb_idx])
             dist = torch.distributions.Categorical(logits=logits)
@@ -232,48 +297,55 @@ def ppo_update(
             ratio = torch.exp(log_ratio)
 
             surr1 = ratio * advantages[mb_idx]
-            surr2 = torch.clamp(ratio, 1 - clip, 1 + clip) * advantages[mb_idx]
+            surr2 = torch.clamp(ratio, 1 - cfg.clip, 1 + cfg.clip) * advantages[mb_idx]
             actor_loss = -torch.min(surr1, surr2).mean()
 
             values_old = old_values[mb_idx]
-            values_clipped = values_old + torch.clamp(values - values_old, -clip, clip)
+            values_clipped = values_old + torch.clamp(values - values_old, -cfg.clip, cfg.clip)
             vf_loss1 = (values - returns[mb_idx]).pow(2)
             vf_loss2 = (values_clipped - returns[mb_idx]).pow(2)
             critic_loss = 0.5 * torch.max(vf_loss1, vf_loss2).mean()
             entropy = dist.entropy().mean()
 
-            loss = actor_loss + vf_coef * critic_loss - ent_coef * entropy
+            loss = actor_loss + cfg.vf_coef * critic_loss - ent_coef * entropy
 
             optimizer.zero_grad()
             loss.backward()
-            nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
+            nn.utils.clip_grad_norm_(model.parameters(), max_norm=cfg.grad_clip)
             optimizer.step()
 
             approx_kl = ((ratio - 1) - log_ratio).mean().item()
             kl_values.append(approx_kl)
             num_updates += 1
 
-            if approx_kl > 0.015:
+            if approx_kl > cfg.kl_threshold:
                 stop_early = True
                 break
-        
+
         if stop_early:
             break
-    
-    return np.mean(kl_values), num_updates
 
-def evaluate(model, obs_rms: RunningMeanStd, env_name="LunarLander-v3", episodes=20, deterministic=True):
-    env = gym.make(env_name)
-    rewards = []
+    return float(np.mean(kl_values)), num_updates
 
-    for ep in range(episodes):
+
+def evaluate(
+    model: nn.Module,
+    obs_rms: RunningMeanStd,
+    device: torch.device,
+    cfg: TrainConfig,
+    deterministic: bool = True,
+) -> Tuple[float, float]:
+    env = gym.make(cfg.env_id)
+    rewards: list[float] = []
+
+    for ep in range(cfg.eval_episodes):
         obs, _ = env.reset(seed=12345 + ep)
         done = False
         ep_reward = 0.0
 
         while not done:
-            obs_n = normalize_obs(obs, obs_rms)
-            obs_tensor = torch.tensor(obs_n, dtype=torch.float32)
+            obs_n = normalize_obs(obs, obs_rms, clip=cfg.obs_clip)
+            obs_tensor = torch.tensor(obs_n, dtype=torch.float32).to(device)
             with torch.no_grad():
                 logits, _ = model(obs_tensor)
 
@@ -282,173 +354,162 @@ def evaluate(model, obs_rms: RunningMeanStd, env_name="LunarLander-v3", episodes
             else:
                 dist = torch.distributions.Categorical(logits=logits)
                 action = dist.sample().item()
-                
+
             obs, reward, terminated, truncated, _ = env.step(action)
             done = terminated or truncated
             ep_reward += reward
-            
+
         rewards.append(ep_reward)
-    
+
     env.close()
-    return np.mean(rewards), np.std(rewards)
+    return float(np.mean(rewards)), float(np.std(rewards))
 
-# setup
-parser = argparse.ArgumentParser()
-parser.add_argument("--seed", type=int, default=0,
-                    help="Random seed for torch / numpy / env reset")
-parser.add_argument("--iterations", type=int, default=1000,
-                    help="Number of PPO iterations to train for")
-args = parser.parse_args()
 
-torch.manual_seed(args.seed)
-np.random.seed(args.seed)
+def resolve_device(name: str) -> torch.device:
+    if name == "auto":
+        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    return torch.device(name)
 
-def make_env(env_id: str, seed: int):
-    def thunk():
-        env = gym.make(env_id)
-        env.reset(seed=seed)
-        return env
-    return thunk
 
-env_id = "LunarLander-v3"
-n_envs = 8
-rollout_steps = 256  # 256 * 8 = 2048 transitions per iteration
+def main(args: argparse.Namespace) -> None:
+    cfg = TrainConfig()
 
-envs = gym.vector.SyncVectorEnv([make_env(env_id, seed=1000 + args.seed * 1000 + i) for i in range(n_envs)])
-obs_dim = envs.single_observation_space.shape[0]
-action_dim = envs.single_action_space.n
-obs_rms = RunningMeanStd(shape=(obs_dim,))
+    torch.manual_seed(args.seed)
+    np.random.seed(args.seed)
 
-model = ActorCritic(obs_dim, action_dim)
-# PPO-style Adam eps helps stability a bit
-optimizer = torch.optim.Adam(model.parameters(), lr=3e-4, eps=1e-5)
+    device = resolve_device(args.device)
+    print(f"Training on device: {device}")
 
-obs, _ = envs.reset(seed=[args.seed * 1000 + i for i in range(n_envs)])
-best_eval = -float("inf")
+    def make_env(env_id: str, seed: int):
+        def thunk():
+            env = gym.make(env_id)
+            env.reset(seed=seed)
+            return env
+        return thunk
 
-log_path = Path(__file__).with_name(f"metrics_seed{args.seed}.csv")
-fieldnames = [
-    "iteration",
-    "env_steps",
-    "dt_sec",
-    "lr",
-    "ent_coef",
-    "approx_kl",
-    "updates",
-    "rollout_ep_ret_mean",
-    "rollout_ep_ret_n",
-    "eval_det_mean",
-    "eval_det_std",
-    "eval_sto_mean",
-    "eval_sto_std",
-    "best_eval_det",
-]
+    envs = gym.vector.SyncVectorEnv(
+        [make_env(cfg.env_id, seed=1000 + args.seed * 1000 + i) for i in range(cfg.n_envs)]
+    )
+    obs_dim = envs.single_observation_space.shape[0]
+    action_dim = envs.single_action_space.n
+    obs_rms = RunningMeanStd(shape=(obs_dim,))
 
-with log_path.open("w", newline="", encoding="utf-8") as f:
-    writer = csv.DictWriter(f, fieldnames=fieldnames)
-    writer.writeheader()
+    model = ActorCritic(obs_dim, action_dim, hidden_dim=cfg.hidden_dim).to(device)
+    # PPO-style Adam eps helps stability a bit
+    optimizer = torch.optim.Adam(model.parameters(), lr=cfg.lr, eps=cfg.adam_eps)
 
-    for iteration in range(args.iterations):
-        t0 = time.time()
-        (
-            states,
-            actions,
-            log_probs,
-            rewards,
-            dones,
-            terminateds,
-            values,
-            next_values,
-            episode_rewards,
-            obs,
-        ) = collect_rollout_vec(model, envs, obs, obs_rms=obs_rms, num_steps=rollout_steps)
+    obs, _ = envs.reset(seed=[args.seed * 1000 + i for i in range(cfg.n_envs)])
+    best_eval = -float("inf")
 
-        advantages, returns = compute_advantages_vec(
-            rewards, values, next_values, dones, terminateds, gamma=0.99, lam=0.95
-        )
+    log_path = Path(__file__).with_name(f"metrics_seed{args.seed}.csv")
+    fieldnames = [
+        "iteration", "env_steps", "dt_sec", "lr", "ent_coef",
+        "approx_kl", "updates", "rollout_ep_ret_mean", "rollout_ep_ret_n",
+        "eval_det_mean", "eval_det_std", "eval_sto_mean", "eval_sto_std", "best_eval_det",
+    ]
 
-        # flatten [T, N, ...] -> [B, ...]
-        B = rollout_steps * n_envs
-        states_f = states.reshape(B, obs_dim)
-        actions_f = actions.reshape(B)
-        log_probs_f = log_probs.reshape(B)
-        values_f = values.reshape(B)
-        advantages_f = advantages.reshape(B)
-        returns_f = returns.reshape(B)
+    with log_path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
 
-        # Light schedules; keep exploration early, converge later
-        frac = 1.0 - iteration / args.iterations
-        if iteration < 300:
-            ent_coef = max(0.001, 0.01 * frac)
-        else:
-            ent_coef = max(0.0005, 0.005 * frac)
+        for iteration in range(args.iterations):
+            t0 = time.time()
+            (
+                states, actions, log_probs, rewards, dones, terminateds,
+                values, next_values, episode_rewards, obs,
+            ) = collect_rollout_vec(model, envs, obs, obs_rms=obs_rms,
+                                    num_steps=cfg.rollout_steps, device=device, cfg=cfg)
 
-        # Keep an LR floor so we can recover after performance dips
-        lr_now = max(1e-4, 3e-4 * frac)
-        for pg in optimizer.param_groups:
-            pg["lr"] = lr_now
+            advantages, returns = compute_advantages_vec(
+                rewards, values, next_values, dones, terminateds,
+                gamma=cfg.gamma, lam=cfg.lam,
+            )
 
-        mean_kl, num_updates = ppo_update(
-            model,
-            optimizer,
-            states_f,
-            actions_f,
-            log_probs_f,
-            values_f,
-            advantages_f,
-            returns_f,
-            ent_coef=ent_coef,
-            epochs=8,
-            batch_size=256,
-            clip=0.2,
-        )
+            # flatten [T, N, ...] -> [B, ...]
+            B = cfg.rollout_steps * cfg.n_envs
+            states_f    = states.reshape(B, obs_dim)
+            actions_f   = actions.reshape(B)
+            log_probs_f = log_probs.reshape(B)
+            values_f    = values.reshape(B)
+            advantages_f = advantages.reshape(B)
+            returns_f   = returns.reshape(B)
 
-        roll_mean = float(np.mean(episode_rewards)) if len(episode_rewards) else float("nan")
-        roll_n = len(episode_rewards)
-        dt = time.time() - t0
-        print(
-            f"it {iteration:04d} | dt {dt:5.2f}s | lr {lr_now:.2e} | "
-            f"KL {mean_kl:.5f} | updates {num_updates:3d} | "
-            f"rollout_ep_ret {roll_mean:7.1f} ({roll_n} eps)"
-        )
+            # Light schedules; keep exploration early, converge later
+            frac = 1.0 - iteration / args.iterations
+            if iteration < cfg.ent_switch:
+                ent_coef = max(cfg.ent_floor_early, cfg.ent_coef_early * frac)
+            else:
+                ent_coef = max(cfg.ent_floor_late, cfg.ent_coef_late * frac)
 
-        mean_eval_det = float("nan")
-        std_eval_det = float("nan")
-        mean_eval_sto = float("nan")
-        std_eval_sto = float("nan")
+            # Keep an LR floor so we can recover after performance dips
+            lr_now = max(cfg.lr_floor, cfg.lr * frac)
+            for pg in optimizer.param_groups:
+                pg["lr"] = lr_now
 
-        if iteration % 10 == 0:
-            # Freeze normalization stats for consistent evaluation
-            obs_rms_eval = obs_rms.snapshot()
-            mean_eval_det, std_eval_det = evaluate(model, obs_rms=obs_rms_eval, episodes=20, deterministic=True)
-            mean_eval_sto, std_eval_sto = evaluate(model, obs_rms=obs_rms_eval, episodes=20, deterministic=False)
+            mean_kl, num_updates = ppo_update(
+                model, optimizer,
+                states_f, actions_f, log_probs_f, values_f, advantages_f, returns_f,
+                device=device, cfg=cfg, ent_coef=ent_coef,
+            )
 
-            print(f"Det eval: {mean_eval_det:.1f} ± {std_eval_det:.1f}")
-            print(f"Sto eval: {mean_eval_sto:.1f} ± {std_eval_sto:.1f}")
-            
-            if mean_eval_det > best_eval:
-                best_eval = mean_eval_det
-                ckpt_path = Path(__file__).with_name(f"best_ppo_lunarlander_seed{args.seed}.pt")
-                torch.save(model.state_dict(), ckpt_path)
-                print(f"New best model saved with eval reward {best_eval:.1f} -> {ckpt_path.name}")
+            roll_mean = float(np.mean(episode_rewards)) if len(episode_rewards) else float("nan")
+            roll_n = len(episode_rewards)
+            dt = time.time() - t0
+            print(
+                f"it {iteration:04d} | dt {dt:5.2f}s | lr {lr_now:.2e} | "
+                f"KL {mean_kl:.5f} | updates {num_updates:3d} | "
+                f"rollout_ep_ret {roll_mean:7.1f} ({roll_n} eps)"
+            )
 
-        writer.writerow(
-            {
+            mean_eval_det = float("nan")
+            std_eval_det  = float("nan")
+            mean_eval_sto = float("nan")
+            std_eval_sto  = float("nan")
+
+            if iteration % cfg.eval_interval == 0:
+                # Freeze normalization stats for consistent evaluation
+                obs_rms_eval = obs_rms.snapshot()
+                mean_eval_det, std_eval_det = evaluate(model, obs_rms_eval, device, cfg, deterministic=True)
+                mean_eval_sto, std_eval_sto = evaluate(model, obs_rms_eval, device, cfg, deterministic=False)
+
+                print(f"Det eval: {mean_eval_det:.1f} ± {std_eval_det:.1f}")
+                print(f"Sto eval: {mean_eval_sto:.1f} ± {std_eval_sto:.1f}")
+
+                if mean_eval_det > best_eval:
+                    best_eval = mean_eval_det
+                    ckpt_path = Path(__file__).with_name(f"best_ppo_lunarlander_seed{args.seed}.pt")
+                    torch.save({
+                        "model": model.state_dict(),
+                        "obs_rms_mean": obs_rms_eval.mean,
+                        "obs_rms_var": obs_rms_eval.var,
+                        "obs_rms_count": obs_rms_eval.count,
+                    }, ckpt_path)
+                    print(f"New best model saved with eval reward {best_eval:.1f} -> {ckpt_path.name}")
+
+            writer.writerow({
                 "iteration": iteration,
-                "env_steps": (iteration + 1) * rollout_steps * n_envs,
-                "dt_sec": dt,
-                "lr": lr_now,
-                "ent_coef": ent_coef,
-                "approx_kl": mean_kl,
-                "updates": num_updates,
-                "rollout_ep_ret_mean": roll_mean,
-                "rollout_ep_ret_n": roll_n,
-                "eval_det_mean": mean_eval_det,
-                "eval_det_std": std_eval_det,
-                "eval_sto_mean": mean_eval_sto,
-                "eval_sto_std": std_eval_sto,
+                "env_steps": (iteration + 1) * cfg.rollout_steps * cfg.n_envs,
+                "dt_sec": dt, "lr": lr_now, "ent_coef": ent_coef,
+                "approx_kl": mean_kl, "updates": num_updates,
+                "rollout_ep_ret_mean": roll_mean, "rollout_ep_ret_n": roll_n,
+                "eval_det_mean": mean_eval_det, "eval_det_std": std_eval_det,
+                "eval_sto_mean": mean_eval_sto, "eval_sto_std": std_eval_sto,
                 "best_eval_det": best_eval,
-            }
-        )
-        f.flush()
+            })
+            f.flush()
 
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--seed", type=int, default=0,
+                        help="Random seed for torch / numpy / env reset")
+    parser.add_argument("--iterations", type=int, default=1000,
+                        help="Number of PPO iterations to train for")
+    parser.add_argument("--device", type=str, default="auto",
+                        choices=["auto", "cpu", "cuda"],
+                        help="Compute device. 'auto' picks cuda if available, else cpu.")
+    return parser.parse_args()
+
+
+if __name__ == "__main__":
+    main(parse_args())
