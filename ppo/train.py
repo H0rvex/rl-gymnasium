@@ -478,7 +478,12 @@ def main(args: argparse.Namespace) -> None:
                 if mean_eval_det > best_eval:
                     best_eval = mean_eval_det
                     ckpt_path = Path(__file__).with_name(f"best_ppo_lunarlander_seed{args.seed}.pt")
-                    torch.save(model.state_dict(), ckpt_path)
+                    torch.save({
+                        "model": model.state_dict(),
+                        "obs_rms_mean": obs_rms_eval.mean,
+                        "obs_rms_var": obs_rms_eval.var,
+                        "obs_rms_count": obs_rms_eval.count,
+                    }, ckpt_path)
                     print(f"New best model saved with eval reward {best_eval:.1f} -> {ckpt_path.name}")
 
             writer.writerow({
