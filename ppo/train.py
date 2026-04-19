@@ -1,13 +1,15 @@
-import torch
-import torch.nn as nn
-import numpy as np
-import gymnasium as gym
+import argparse
 import time
 from dataclasses import dataclass
-from typing import Tuple
-import argparse
-import csv
 from pathlib import Path
+from typing import Tuple
+
+import gymnasium as gym
+import numpy as np
+import torch
+import torch.nn as nn
+
+from common import CsvLogger, resolve_device, seed_all
 
 
 @dataclass
@@ -16,7 +18,7 @@ class TrainConfig:
     env_id: str = "LunarLander-v3"
     n_envs: int = 8
     rollout_steps: int = 256        # per env; total batch = n_envs * rollout_steps
-
+    
     # Network
     hidden_dim: int = 64
 
@@ -41,12 +43,11 @@ class TrainConfig:
     ent_floor_early: float = 0.001
     ent_floor_late: float = 0.0005
     ent_switch: int = 300           # iteration at which late schedule kicks in
-
+    
     # Evaluation
     eval_interval: int = 10
     eval_episodes: int = 20
     obs_clip: float = 10.0
-
 
 # Type alias for collect_rollout_vec return
 RolloutBatch = Tuple[
@@ -367,18 +368,10 @@ def evaluate(
     return float(np.mean(rewards)), float(np.std(rewards))
 
 
-def resolve_device(name: str) -> torch.device:
-    if name == "auto":
-        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    return torch.device(name)
-
-
 def main(args: argparse.Namespace) -> None:
     cfg = TrainConfig()
 
-    torch.manual_seed(args.seed)
-    np.random.seed(args.seed)
-
+    seed_all(args.seed)
     device = resolve_device(args.device)
     print(f"Training on device: {device}")
 
@@ -415,10 +408,7 @@ def main(args: argparse.Namespace) -> None:
         "eval_det_mean", "eval_det_std", "eval_sto_mean", "eval_sto_std", "best_eval_det",
     ]
 
-    with log_path.open("w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
-        writer.writeheader()
-
+    with CsvLogger(log_path, fieldnames) as logger:
         for iteration in range(args.iterations):
             t0 = time.time()
             (
@@ -493,7 +483,7 @@ def main(args: argparse.Namespace) -> None:
                     }, ckpt_path)
                     print(f"New best model saved with eval reward {best_eval:.1f} -> {ckpt_path.name}")
 
-            writer.writerow({
+            logger.log({
                 "iteration": iteration,
                 "env_steps": (iteration + 1) * cfg.rollout_steps * cfg.n_envs,
                 "dt_sec": dt, "lr": lr_now, "ent_coef": ent_coef,
@@ -503,7 +493,6 @@ def main(args: argparse.Namespace) -> None:
                 "eval_sto_mean": mean_eval_sto, "eval_sto_std": std_eval_sto,
                 "best_eval_det": best_eval,
             })
-            f.flush()
 
 
 def parse_args() -> argparse.Namespace:

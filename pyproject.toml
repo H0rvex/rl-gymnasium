@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rl-gymnasium"
+version = "0.1.0"
+description = "From-scratch REINFORCE / DQN / PPO in PyTorch + Gymnasium."
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [{ name = "h0rvex" }]
+license = { text = "MIT" }
+
+# Floors chosen for known-good compatibility:
+#   - torch 2.7.x: the version the reported PPO results were produced with
+#   - gymnasium 1.x: the rollout code relies on the 1.0+ vector autoreset API
+#     (`infos["final_obs"]`, `AutoresetMode.SAME_STEP`)
+#   - numpy <2.0: torch 2.7 wheels were built against the NumPy 1.x ABI
+dependencies = [
+    "torch>=2.7,<3.0",
+    "gymnasium>=1.0,<2.0",
+    "numpy>=1.26,<2.0",
+    "matplotlib>=3.8",
+    "imageio>=2.31",
+]
+
+[project.optional-dependencies]
+# LunarLander Box2D physics — pulled as an extra because it requires a C
+# compiler and isn't needed for the CartPole-only algorithms (REINFORCE, DQN).
+box2d = ["gymnasium[box2d]>=1.0"]
+dev = ["pytest>=7.0", "ruff>=0.4"]
+
+[tool.setuptools.packages.find]
+# Only `common/` is a proper package. reinforce/ dqn/ ppo/ scripts/ are
+# script folders run by path and are intentionally not installed.
+include = ["common*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"

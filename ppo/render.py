@@ -24,9 +24,13 @@ import gymnasium as gym
 from train import ActorCritic, RunningMeanStd, TrainConfig, normalize_obs
 
 
-def load_checkpoint(path: Path, obs_dim: int, action_dim: int,
-                    cfg: TrainConfig, device: torch.device,
-                    ) -> tuple[torch.nn.Module, RunningMeanStd | None]:
+def load_checkpoint(
+    path: Path,
+    obs_dim: int,
+    action_dim: int,
+    cfg: TrainConfig,
+    device: torch.device,
+) -> tuple[torch.nn.Module, RunningMeanStd | None]:
     """Return (model, obs_rms | None). None means legacy format — caller must warm up RMS."""
     ckpt = torch.load(path, map_location=device, weights_only=True)
     model = ActorCritic(obs_dim, action_dim, hidden_dim=cfg.hidden_dim).to(device)
@@ -34,8 +38,8 @@ def load_checkpoint(path: Path, obs_dim: int, action_dim: int,
     if isinstance(ckpt, dict) and "model" in ckpt:
         model.load_state_dict(ckpt["model"])
         obs_rms = RunningMeanStd(shape=(obs_dim,))
-        obs_rms.mean  = np.asarray(ckpt["obs_rms_mean"],  dtype=np.float64)
-        obs_rms.var   = np.asarray(ckpt["obs_rms_var"],   dtype=np.float64)
+        obs_rms.mean = np.asarray(ckpt["obs_rms_mean"], dtype=np.float64)
+        obs_rms.var = np.asarray(ckpt["obs_rms_var"], dtype=np.float64)
         obs_rms.count = float(ckpt["obs_rms_count"])
     else:
         model.load_state_dict(ckpt)
@@ -45,8 +49,9 @@ def load_checkpoint(path: Path, obs_dim: int, action_dim: int,
     return model, obs_rms
 
 
-def warmup_rms(model: torch.nn.Module, cfg: TrainConfig,
-               device: torch.device, n_steps: int) -> RunningMeanStd:
+def warmup_rms(
+    model: torch.nn.Module, cfg: TrainConfig, device: torch.device, n_steps: int
+) -> RunningMeanStd:
     """
     Run the policy for n_steps to estimate the observation distribution.
     A converged policy visits the same obs distribution as late training,
@@ -104,25 +109,31 @@ def render_episode(
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--checkpoint",    required=True, help="Path to .pt checkpoint")
-    parser.add_argument("--out",           default="ppo/plots/rollout.gif")
-    parser.add_argument("--seed",          type=int, default=0)
-    parser.add_argument("--fps",           type=int, default=30)
-    parser.add_argument("--warmup-steps",  type=int, default=0,
-                        help="Steps to run before rendering to estimate obs RMS. "
-                             "Use ~5000 for legacy checkpoints without saved RMS.")
-    parser.add_argument("--device",        type=str, default="cpu")
+    parser.add_argument("--checkpoint", required=True, help="Path to .pt checkpoint")
+    parser.add_argument("--out", default="ppo/plots/rollout.gif")
+    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--fps", type=int, default=30)
+    parser.add_argument(
+        "--warmup-steps",
+        type=int,
+        default=0,
+        help="Steps to run before rendering to estimate obs RMS. "
+        "Use ~5000 for legacy checkpoints without saved RMS.",
+    )
+    parser.add_argument("--device", type=str, default="cpu")
     args = parser.parse_args()
 
-    cfg    = TrainConfig()
+    cfg = TrainConfig()
     device = torch.device(args.device)
 
-    env_probe  = gym.make(cfg.env_id)
-    obs_dim    = env_probe.observation_space.shape[0]
+    env_probe = gym.make(cfg.env_id)
+    obs_dim = env_probe.observation_space.shape[0]
     action_dim = env_probe.action_space.n
     env_probe.close()
 
-    model, obs_rms = load_checkpoint(Path(args.checkpoint), obs_dim, action_dim, cfg, device)
+    model, obs_rms = load_checkpoint(
+        Path(args.checkpoint), obs_dim, action_dim, cfg, device
+    )
 
     if obs_rms is None:
         warmup = args.warmup_steps if args.warmup_steps > 0 else 5000
