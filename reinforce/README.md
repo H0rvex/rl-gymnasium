@@ -2,6 +2,10 @@
 
 From-scratch policy gradient in PyTorch + Gymnasium.
 
+![Evaluation curves](plots/eval_curves.png)
+
+![Training return (smoothed)](plots/ep_return.png)
+
 ### Run
 
 ```bash
@@ -12,7 +16,7 @@ python reinforce/train.py
 python reinforce/train.py --seed 1 --episodes 1000 --device cpu
 ```
 
-Install first: `pip install -e .` from repo root (requires Python ≥3.11; see pyproject.toml).
+Install first: `pip install -e .` from repo root.
 
 ### Hyperparameters
 
@@ -34,6 +38,34 @@ Install first: `pip install -e .` from repo root (requires Python ≥3.11; see p
 | 2 | 350 | 43 190 | 500.0 | 479.9 |
 
 "Solve" = deterministic eval ≥ 499 (CartPole-v1 cap is 500). All three seeds reach it; seeds 1/2 show mild oscillation in the final episodes rather than locking in — expected for a high-variance on-policy method with no replay.
+
+### Hardware & runtime
+
+Tested on Python 3.10, torch 2.7. Runs CPU-only; ~3–5 min per seed on a modern CPU.
+
+### Reproducing
+
+```bash
+# train 3 seeds
+python reinforce/train.py --seed 0
+python reinforce/train.py --seed 1
+python reinforce/train.py --seed 2
+
+# eval curves (mean ± std across seeds)
+python scripts/plot_csv.py --csv "reinforce/metrics_seed*.csv" \
+    --x episode --ys eval_det_mean,eval_sto_mean \
+    --title "REINFORCE — CartPole-v1 (3 seeds)" --ylabel "Eval return" \
+    --out reinforce/plots/eval_curves.png
+
+# training return (smoothed)
+python scripts/plot_csv.py --csv "reinforce/metrics_seed*.csv" \
+    --x episode --ys ep_return --smooth 25 \
+    --title "REINFORCE — training return, smoothed window=25 (3 seeds)" \
+    --ylabel "Episode return" \
+    --out reinforce/plots/ep_return.png
+```
+
+CSV columns logged per episode: `episode, env_steps, dt_sec, loss, ep_return, ep_length, eval_det_mean, eval_det_std, eval_sto_mean, eval_sto_std, best_eval_det`.
 
 ### What I learned
 
