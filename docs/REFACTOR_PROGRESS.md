@@ -39,7 +39,7 @@ Legend: `[ ]` not started · `[~]` in progress · `[x]` done
 
 | # | Item | Status | Commit |
 |---|---|---|---|
-| 4 | Smoke tests per algorithm (`pytest` asserting CSV written, no NaN loss) | [ ] | — |
+| 4 | Smoke tests per algorithm (`pytest` asserting CSV written, no NaN loss) | [x] | _pending commit_ |
 | 5 | PPO README honest caveat (n=3 seeds, CPU-only) | [x] | _pending commit_ |
 | 6 | Autoreset-fix debugging writeup in PPO README (reference commit `5e15932`) | [x] | _pending commit_ |
 
@@ -52,7 +52,7 @@ Legend: `[ ]` not started · `[~]` in progress · `[x]` done
 
 ## Current state
 
-All P0 items and P1 items 5/6 are done, pending a single commit sweep. P1 item 4 (pytest smoke tests) and all P2 items are the only remaining open work.
+All P0 items and all P1 items are done, pending a single commit sweep. Only P2 (TensorBoard/W&B, common/ consolidation) remains.
 
 Pending commits (in order):
 1. `chore` — `.gitignore` add `logs/`, `rl_gymnasium.egg-info/`
