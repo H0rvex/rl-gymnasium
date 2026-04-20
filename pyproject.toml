@@ -28,7 +28,7 @@ dependencies = [
 # LunarLander Box2D physics — pulled as an extra because it requires a C
 # compiler and isn't needed for the CartPole-only algorithms (REINFORCE, DQN).
 box2d = ["gymnasium[box2d]>=1.0"]
-dev = ["pytest>=7.0", "ruff>=0.4"]
+dev = ["pytest>=7.0", "ruff>=0.4", "tensorboard>=2.14"]
 
 [tool.setuptools.packages.find]
 # Only `common/` is a proper package. reinforce/ dqn/ ppo/ scripts/ are

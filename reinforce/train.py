@@ -9,7 +9,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from common import CsvLogger, resolve_device, seed_all
+from common import CsvLogger, TbLogger, resolve_device, seed_all
 
 
 @dataclass
@@ -146,6 +146,7 @@ def main(args: argparse.Namespace) -> None:
     optimizer = torch.optim.Adam(policy.parameters(), lr=cfg.lr)
 
     log_path = Path(__file__).with_name(f"metrics_seed{args.seed}.csv")
+    tb_dir = Path(__file__).parent / "runs" / f"seed{args.seed}"
     fieldnames = [
         "episode", "env_steps", "dt_sec", "loss", "ep_return", "ep_length",
         "eval_det_mean", "eval_det_std", "eval_sto_mean", "eval_sto_std", "best_eval_det",
@@ -154,7 +155,7 @@ def main(args: argparse.Namespace) -> None:
     total_env_steps = 0
     best_eval = -float("inf")
 
-    with CsvLogger(log_path, fieldnames) as logger:
+    with CsvLogger(log_path, fieldnames) as logger, TbLogger(tb_dir) as tb:
         for episode in range(args.episodes):
             t0 = time.time()
             log_probs, rewards = run_episode(policy, env, device)
@@ -198,6 +199,12 @@ def main(args: argparse.Namespace) -> None:
                 "eval_sto_std": std_eval_sto,
                 "best_eval_det": best_eval if best_eval > -float("inf") else float("nan"),
             })
+            tb.scalar("train/loss", loss, total_env_steps)
+            tb.scalar("train/ep_return", ep_return, total_env_steps)
+            tb.scalar("train/ep_length", ep_length, total_env_steps)
+            tb.scalar("eval/det_mean", mean_eval_det, total_env_steps)
+            tb.scalar("eval/sto_mean", mean_eval_sto, total_env_steps)
+            tb.scalar("eval/best_det", best_eval if best_eval > -float("inf") else float("nan"), total_env_steps)
 
     env.close()
 

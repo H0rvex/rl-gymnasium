@@ -4,4 +4,5 @@ __pycache__/
 # Legacy single-seed CSV (replaced by ppo/metrics_seed*.csv which IS tracked).
 ppo/metrics.csv
 logs/
+*/runs/
 rl_gymnasium.egg-info/

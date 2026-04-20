@@ -1,4 +1,5 @@
 import csv
+import math
 from pathlib import Path
 from typing import Any
 
@@ -41,3 +42,37 @@ class CsvLogger:
         filled = {k: row.get(k, float("nan")) for k in self.fieldnames}
         self._writer.writerow(filled)
         self._f.flush()
+
+
+class TbLogger:
+    """Thin context-manager wrapper around torch.utils.tensorboard.SummaryWriter.
+
+    Matches CsvLogger's lifecycle so both can be opened in a single `with` block.
+    NaN values are silently skipped — TensorBoard rejects them and they carry no
+    information worth plotting.
+
+    Usage:
+        with TbLogger(log_dir) as tb:
+            tb.scalar("train/loss", loss, step=episode)
+    """
+
+    def __init__(self, log_dir: Path) -> None:
+        self.log_dir = Path(log_dir)
+        self._writer: Any = None
+
+    def __enter__(self) -> "TbLogger":
+        from torch.utils.tensorboard import SummaryWriter
+        self.log_dir.mkdir(parents=True, exist_ok=True)
+        self._writer = SummaryWriter(str(self.log_dir))
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        if self._writer is not None:
+            self._writer.close()
+            self._writer = None
+
+    def scalar(self, tag: str, value: float, step: int) -> None:
+        if self._writer is None:
+            raise RuntimeError("TbLogger used outside of its `with` block")
+        if not math.isnan(value):
+            self._writer.add_scalar(tag, value, global_step=step)

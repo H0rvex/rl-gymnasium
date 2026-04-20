@@ -9,7 +9,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from common import CsvLogger, resolve_device, seed_all
+from common import CsvLogger, TbLogger, resolve_device, seed_all
 
 
 @dataclass
@@ -402,13 +402,14 @@ def main(args: argparse.Namespace) -> None:
     best_eval = -float("inf")
 
     log_path = Path(__file__).with_name(f"metrics_seed{args.seed}.csv")
+    tb_dir = Path(__file__).parent / "runs" / f"seed{args.seed}"
     fieldnames = [
         "iteration", "env_steps", "dt_sec", "lr", "ent_coef",
         "approx_kl", "updates", "rollout_ep_ret_mean", "rollout_ep_ret_n",
         "eval_det_mean", "eval_det_std", "eval_sto_mean", "eval_sto_std", "best_eval_det",
     ]
 
-    with CsvLogger(log_path, fieldnames) as logger:
+    with CsvLogger(log_path, fieldnames) as logger, TbLogger(tb_dir) as tb:
         for iteration in range(args.iterations):
             t0 = time.time()
             (
@@ -483,9 +484,10 @@ def main(args: argparse.Namespace) -> None:
                     }, ckpt_path)
                     print(f"New best model saved with eval reward {best_eval:.1f} -> {ckpt_path.name}")
 
+            env_steps = (iteration + 1) * cfg.rollout_steps * cfg.n_envs
             logger.log({
                 "iteration": iteration,
-                "env_steps": (iteration + 1) * cfg.rollout_steps * cfg.n_envs,
+                "env_steps": env_steps,
                 "dt_sec": dt, "lr": lr_now, "ent_coef": ent_coef,
                 "approx_kl": mean_kl, "updates": num_updates,
                 "rollout_ep_ret_mean": roll_mean, "rollout_ep_ret_n": roll_n,
@@ -493,6 +495,13 @@ def main(args: argparse.Namespace) -> None:
                 "eval_sto_mean": mean_eval_sto, "eval_sto_std": std_eval_sto,
                 "best_eval_det": best_eval,
             })
+            tb.scalar("train/approx_kl", mean_kl, env_steps)
+            tb.scalar("train/rollout_ep_ret_mean", roll_mean, env_steps)
+            tb.scalar("train/lr", lr_now, env_steps)
+            tb.scalar("train/ent_coef", ent_coef, env_steps)
+            tb.scalar("eval/det_mean", mean_eval_det, env_steps)
+            tb.scalar("eval/sto_mean", mean_eval_sto, env_steps)
+            tb.scalar("eval/best_det", best_eval, env_steps)
 
 
 def parse_args() -> argparse.Namespace:

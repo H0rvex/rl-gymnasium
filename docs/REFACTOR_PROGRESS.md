@@ -47,12 +47,12 @@ Legend: `[ ]` not started · `[~]` in progress · `[x]` done
 
 | # | Item | Status | Commit |
 |---|---|---|---|
-| 7 | TensorBoard or W&B logging alongside CSV | [ ] | — |
-| 8 | Further consolidation in `common/` (only if duplication reappears) | [ ] | — |
+| 7 | TensorBoard or W&B logging alongside CSV | [x] | _pending commit_ |
+| 8 | Further consolidation in `common/` (only if duplication reappears) | [x] | _pending commit_ |
 
 ## Current state
 
-All P0 items and all P1 items are done, pending a single commit sweep. Only P2 (TensorBoard/W&B, common/ consolidation) remains.
+All items done. TbLogger lives in common/ (item 8 consolidation) and is used identically by all three algorithms (item 7). Pending a final commit sweep.
 
 Pending commits (in order):
 1. `chore` — `.gitignore` add `logs/`, `rl_gymnasium.egg-info/`
