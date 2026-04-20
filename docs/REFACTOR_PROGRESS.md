@@ -14,7 +14,7 @@ Living doc for the rl-gymnasium portfolio-readiness refactor. Update as work lan
 - **Eval cadence:** REINFORCE every 25 eps, DQN every 50 eps.
 - **DQN target update:** per-env-step, every 1000 steps (was: per 10 episodes).
 - **Scaffolding:** Option C — minimal `common/` package for zero-policy utilities (device, seeding, CSV logger). Networks / update rules / eval stay in-file.
-- **Packaging:** `pyproject.toml` + `pip install -e .` replaces `requirements.txt`. `[box2d]` and `[dev]` as optional extras.
+- **Packaging:** `pyproject.toml` + `pip install -e .` replaces `requirements.txt`. `[box2d]` and `[dev]` as optional extras. `requires-python` floor is `3.10` (code uses no 3.11-only syntax; tested on 3.10).
 
 ## Action list
 
@@ -29,19 +29,19 @@ Legend: `[ ]` not started · `[~]` in progress · `[x]` done
 | 1c | `common/` package (device, seeding, CsvLogger) | [x] | `01c6d56` |
 | 1d | Refactor all three train.py to import from `common/` | [x] | `01c6d56` |
 | 1e | Smoke-run the three refactored train.py files (10-iter sanity) | [x] | _no artifacts (cleaned)_ |
-| 1f | Run 3-seed REINFORCE + DQN training, commit metrics CSVs | [~] | _pending commit_ |
+| 1f | Run 3-seed REINFORCE + DQN training, commit metrics CSVs | [x] | _pending commit_ |
 | 1g | REINFORCE README (hyperparameter table, results, plots, what I learned) | [x] | _pending commit_ |
 | 1h | DQN README (same, incl. Double-DQN rationale + plots) | [x] | _pending commit_ |
 | 2 | `pyproject.toml` with pinned floors; drop `requirements*.txt` | [x] | `01c6d56` |
-| 3 | Root README rework (drop roadmap, update run commands to `pip install -e .`) | [ ] | — |
+| 3 | Root README rework (drop roadmap, update run commands to `pip install -e .`) | [x] | _pending commit_ |
 
 ### P1 — measurable improvements
 
 | # | Item | Status | Commit |
 |---|---|---|---|
 | 4 | Smoke tests per algorithm (`pytest` asserting CSV written, no NaN loss) | [ ] | — |
-| 5 | PPO README honest caveat (n=3 seeds, CPU-only) | [ ] | — |
-| 6 | Autoreset-fix debugging writeup in PPO README (reference commit `5e15932`) | [ ] | — |
+| 5 | PPO README honest caveat (n=3 seeds, CPU-only) | [x] | _pending commit_ |
+| 6 | Autoreset-fix debugging writeup in PPO README (reference commit `5e15932`) | [x] | _pending commit_ |
 
 ### P2 — nice to have
 
@@ -50,17 +50,14 @@ Legend: `[ ]` not started · `[~]` in progress · `[x]` done
 | 7 | TensorBoard or W&B logging alongside CSV | [ ] | — |
 | 8 | Further consolidation in `common/` (only if duplication reappears) | [ ] | — |
 
-## Current session
+## Current state
 
-Scaffolding refactor landed as `01c6d56`. 1e smoke-runs passed for all three trainers (REINFORCE 10 eps, DQN 5 eps, PPO 2 iters) — smoke artifacts cleaned. 1f completed: 3 seeds × REINFORCE (1000 eps) and 3 seeds × DQN (2000 eps, Double DQN default) on CartPole-v1, CPU. Results:
+All P0 items and P1 items 5/6 are done, pending a single commit sweep. P1 item 4 (pytest smoke tests) and all P2 items are the only remaining open work.
 
-- **REINFORCE** best_det / final_det per seed: 500/500, 500/493, 500/480 — solved on all seeds, mild final-epoch oscillation
-- **DQN** best_det / final_det per seed: 500/500, 500/237, 500/268 — all seeds hit 500 briefly, seeds 1/2 regressed (classic DQN instability worth documenting in 1h)
-
-CSVs staged but uncommitted pending commit-plan review.
-
-Env note: `pyproject.toml` requires `python>=3.11` but the active `ml` conda env is Python 3.10. Trainers run fine under 3.10 (no 3.11-only syntax). Decide: lower `requires-python` floor to `3.10`, or build a 3.11 env. Runs here used `PYTHONPATH=.` since `pip install -e .` refuses under 3.10.
-
-## Next session
-
-Commit the 3-seed CSVs (see commit plan), then start **1g** (REINFORCE README) and **1h** (DQN README — the seed 1/2 regression is the headline finding, motivates Double DQN rationale). After that, **3** (root README rework).
+Pending commits (in order):
+1. `chore` — `.gitignore` add `logs/`, `rl_gymnasium.egg-info/`
+2. `data` — 3-seed REINFORCE + DQN CSVs (`reinforce/metrics_seed*.csv`, `dqn/metrics_seed*.csv`)
+3. `docs` — REINFORCE + DQN READMEs with plots, hyperparams, results, learnings (`reinforce/plots/`, `dqn/plots/`)
+4. `docs(root)` — root README rework + `pyproject.toml` `requires-python` floor fix + PPO README setup fix
+5. `docs(ppo)` — hardware caveat (Python 3.10) + autoreset debugging writeup
+6. `docs` — this file (REFACTOR_PROGRESS.md)

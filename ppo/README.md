@@ -68,7 +68,7 @@ LunarLander-v3 is considered solved at 200+. All 3 seeds converge reliably above
 
 ## Hardware & runtime
 
-Tested on Python 3.12, torch 2.7.1+cu118. Training runs CPU-only by default (`SyncVectorEnv` is the bottleneck, not the tiny network). Wallclock ~41 min per seed on a modern CPU; GPU provides no meaningful speedup here. Pass `--device cuda` to use GPU — relevant once you scale to MuJoCo.
+Tested on Python 3.10, torch 2.5+. Training runs CPU-only by default (`SyncVectorEnv` is the bottleneck, not the tiny network). Wallclock ~41 min per seed on a modern CPU; GPU provides no meaningful speedup here. Pass `--device cuda` to use GPU — relevant once you scale to MuJoCo.
 
 ## Reproducing
 
@@ -100,6 +100,31 @@ CSV columns logged per iteration: `iteration, env_steps, dt_sec, lr, ent_coef, a
 - **Vectorized envs are not just throughput.** Eight parallel envs at decorrelated episode phases produce a much better gradient estimate per iteration than 1 env × 8× rollout length.
 - **Frozen-RMS evaluation** matters more than expected: without it, eval scores drift even at constant policy quality, which makes "best model" selection unreliable.
 - The det-vs-sto eval gap is a useful health metric: if stochastic eval ≫ deterministic eval, the policy is exploiting its own noise and the mode is suboptimal.
+
+## Debugging: Gymnasium 1.0 autoreset regression (commit `5e15932`)
+
+This bug took several training runs to surface and is worth documenting because it is completely silent — no crash, no NaN, just subtly lower scores.
+
+**Background.** When using `gym.vector.SyncVectorEnv`, each sub-env resets automatically when an episode ends. The reset happens mid-rollout, so at the step where episode N ends, `next_obs` returned by `envs.step()` is already the first observation of episode N+1, not the true terminal observation of episode N. To compute the correct GAE bootstrap target `V(s_terminal)` we need the terminal obs — which Gymnasium stores in `infos["final_obs"]`.
+
+**What changed in Gymnasium 1.0.** The default autoreset mode switched from `SAME_STEP` to `NEXT_STEP`:
+
+- **`SAME_STEP` (old default):** reset happens on the same step the episode ends. `next_obs` = reset obs; terminal obs available in `infos["final_obs"]`. The bootstrap fix works correctly with this mode.
+- **`NEXT_STEP` (new default):** reset is deferred one step. This silently injects a spurious transition — `(terminal_obs, no-op action, reward=0, next_obs=reset_obs, done=False)` — into the rollout. The bootstrap saw `V(reset_obs)` instead of `V(terminal_obs)`, corrupting the advantage estimate for every episode boundary in the rollout.
+
+The other half of the breakage: the info key was renamed from `final_observation` (Gymnasium <1.0) to `final_obs` (Gymnasium ≥1.0). The old key check silently fell through to `next_obs_for_value = next_obs`, so the fix was never applied even when training on SAME_STEP mode.
+
+**The fix** (two lines):
+
+```python
+# pin the autoreset mode so the bootstrap path stays correct
+envs = gym.vector.SyncVectorEnv(..., autoreset_mode=gym.vector.AutoresetMode.SAME_STEP)
+
+# updated info key for Gymnasium 1.0+
+if isinstance(infos, dict) and "final_obs" in infos:   # was "final_observation"
+```
+
+**Why it was hard to catch.** The corrupted transitions only occur at episode boundaries (roughly every 200–400 steps in LunarLander). Each bad bootstrap shifts the advantage estimate by `γ · (V(reset_obs) - V(terminal_obs))`, which is non-zero but small. Training still progresses; it just plateaus ~30–50 points lower. Without a known-good baseline to compare against, you'd attribute the gap to hyperparameters.
 
 ## Next
 
