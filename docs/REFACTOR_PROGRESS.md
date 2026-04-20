@@ -30,8 +30,8 @@ Legend: `[ ]` not started · `[~]` in progress · `[x]` done
 | 1d | Refactor all three train.py to import from `common/` | [x] | `01c6d56` |
 | 1e | Smoke-run the three refactored train.py files (10-iter sanity) | [x] | _no artifacts (cleaned)_ |
 | 1f | Run 3-seed REINFORCE + DQN training, commit metrics CSVs | [~] | _pending commit_ |
-| 1g | REINFORCE README (hyperparameter table, results, what I learned) | [ ] | — |
-| 1h | DQN README (same, including Double-DQN rationale) | [ ] | — |
+| 1g | REINFORCE README (hyperparameter table, results, what I learned) | [x] | _pending commit_ |
+| 1h | DQN README (same, including Double-DQN rationale) | [x] | _pending commit_ |
 | 2 | `pyproject.toml` with pinned floors; drop `requirements*.txt` | [x] | `01c6d56` |
 | 3 | Root README rework (drop roadmap, update run commands to `pip install -e .`) | [ ] | — |
 
