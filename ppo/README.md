@@ -73,8 +73,7 @@ Tested on Python 3.12, torch 2.7.1+cu118. Training runs CPU-only by default (`Sy
 ## Reproducing
 
 ```bash
-pip install -r requirements.txt
-pip install -r requirements-box2d.txt   # LunarLander Box2D physics
+pip install -e ".[box2d]"   # from repo root
 
 # Train across 3 seeds (~30-35 min each on CPU; can run in parallel terminals)
 python ppo/train.py --seed 0

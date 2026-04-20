@@ -1,6 +1,6 @@
 # rl-gymnasium
 
-From-scratch implementations of foundational RL algorithms in PyTorch + Gymnasium. Each project is self-contained, runnable, and instrumented with metrics + plots.
+From-scratch implementations of foundational RL algorithms in PyTorch + Gymnasium. Each project is self-contained, runnable, and instrumented with metrics and plots.
 
 ## About
 
@@ -8,52 +8,59 @@ A learning portfolio building toward reinforcement learning for **robotics / emb
 
 ## Projects
 
-| Status | Algorithm | Environment | Folder |
+| Algorithm | Environment | Results | Folder |
 |---|---|---|---|
-| ✅ | REINFORCE | CartPole-v1 | [`reinforce/`](reinforce/) |
-| ✅ | DQN | CartPole-v1 | [`dqn/`](dqn/) |
-| ✅ | PPO (discrete) | LunarLander-v3 | [`ppo/`](ppo/) |
-| 📋 | PPO (continuous) | HalfCheetah-v4 (MuJoCo) | _next_ |
-| 📋 | SAC | HalfCheetah-v4 (MuJoCo) | _planned_ |
-| 📋 | PPO @ scale | Isaac Lab humanoid locomotion | _planned_ |
+| REINFORCE | CartPole-v1 | Solves in ≤450 eps across 3 seeds | [`reinforce/`](reinforce/) |
+| Double DQN | CartPole-v1 | All 3 seeds hit 500; post-solve regression documented | [`dqn/`](dqn/) |
+| PPO (discrete) | LunarLander-v3 | 257 ± 14 det. eval across 3 seeds | [`ppo/`](ppo/) |
 
-Each project's README documents its design decisions, hyperparameters, multi-seed results, and reproduction commands.
+Each project's README documents design decisions, hyperparameters, multi-seed results, training curves, and reproduction commands.
 
 ## Setup
 
-Tested with Python 3.11.
-
 ```bash
-pip install -r requirements.txt
-# For LunarLander Box2D physics:
-pip install -r requirements-box2d.txt
+git clone <repo>
+cd rl-gymnasium
+
+# core deps (REINFORCE + DQN)
+pip install -e .
+
+# add Box2D physics for LunarLander (PPO)
+pip install -e ".[box2d]"
 ```
+
+Requires Python ≥3.10. Pinned dependency floors are in `pyproject.toml`.
 
 ## Run
 
-From the repo root:
-
 ```bash
-python reinforce/train.py
-python dqn/train.py
+# REINFORCE — CartPole-v1
+python reinforce/train.py --seed 0
+
+# Double DQN — CartPole-v1
+python dqn/train.py --seed 0
+
+# PPO — LunarLander-v3
 python ppo/train.py --seed 0
 ```
 
-The PPO trainer accepts `--seed` and `--iterations` for multi-seed runs.
+Pass `--help` to any trainer for the full flag list (`--episodes`, `--iterations`, `--device`, `--double-dqn`/`--no-double-dqn`).
 
 ## Plotting
 
-Shared plotting utility supports single runs, multi-seed mean ± std bands, and rolling-window smoothing:
+Shared plotting utility in `scripts/plot_csv.py` supports single runs, multi-seed mean ± std bands, and rolling-window smoothing:
 
 ```bash
-# Single run
-python scripts/plot_csv.py --csv ppo/metrics_seed0.csv --ys eval_det_mean,eval_sto_mean
+# single run
+python scripts/plot_csv.py --csv reinforce/metrics_seed0.csv \
+    --x episode --ys eval_det_mean,eval_sto_mean
 
-# Multi-seed (glob expands to all matching CSVs; mean +/- std band drawn automatically)
+# multi-seed mean ± std band
 python scripts/plot_csv.py --csv "ppo/metrics_seed*.csv" \
     --ys rollout_ep_ret_mean --smooth 50 --out ppo/plots/rollout_return.png
 ```
 
 ## Notes
 
-- Model checkpoints (`*.pt`) are gitignored. Per-run metrics CSVs (`metrics_seed*.csv`) are tracked so plots in each project's README are reproducible from committed data alone.
+- Checkpoints (`*.pt`) are gitignored. Per-run metrics CSVs (`metrics_seed*.csv`) are tracked so plots in each README are reproducible from committed data alone.
+- `common/` is a minimal shared package (device selection, seeding, CSV logger). Networks, update rules, and eval loops stay in each algorithm's `train.py`.

@@ -7,7 +7,7 @@ name = "rl-gymnasium"
 version = "0.1.0"
 description = "From-scratch REINFORCE / DQN / PPO in PyTorch + Gymnasium."
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.10"
 authors = [{ name = "h0rvex" }]
 license = { text = "MIT" }
 
