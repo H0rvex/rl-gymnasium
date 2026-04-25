@@ -62,6 +62,7 @@ class TbLogger:
 
     def __enter__(self) -> "TbLogger":
         from torch.utils.tensorboard import SummaryWriter
+
         self.log_dir.mkdir(parents=True, exist_ok=True)
         self._writer = SummaryWriter(str(self.log_dir))
         return self
