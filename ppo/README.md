@@ -125,7 +125,3 @@ if isinstance(infos, dict) and "final_obs" in infos:   # was "final_observation"
 ```
 
 **Why it was hard to catch.** The corrupted transitions only occur at episode boundaries (roughly every 200–400 steps in LunarLander). Each bad bootstrap shifts the advantage estimate by `γ · (V(reset_obs) - V(terminal_obs))`, which is non-zero but small. Training still progresses; it just plateaus ~30–50 points lower. Without a known-good baseline to compare against, you'd attribute the gap to hyperparameters.
-
-## Next
-
-Continuous-action PPO on `HalfCheetah-v4` (MuJoCo) — Gaussian policy head with state-independent `log_std`, reward normalization in addition to obs normalization, same scaffolding otherwise.
