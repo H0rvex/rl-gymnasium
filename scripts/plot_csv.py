@@ -39,7 +39,7 @@ def smooth(y, window):
     out = np.full(n, np.nan)
     for i in range(n):
         lo = max(0, i - window + 1)
-        seg = y[lo:i + 1]
+        seg = y[lo : i + 1]
         seg = seg[np.isfinite(seg)]
         if len(seg) > 0:
             out[i] = seg.mean()
@@ -64,21 +64,30 @@ def align_by_x(runs_x, runs_y):
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--csv", type=str, required=True,
-                   help="Path or glob (e.g. 'ppo/metrics_seed*.csv') to one or more CSV files. "
-                        "If multiple files match, plots mean +/- std across runs.")
-    p.add_argument("--x", type=str, default="iteration",
-                   help="X-axis column (default: iteration)")
-    p.add_argument("--ys", type=str, default="eval_det_mean,eval_sto_mean",
-                   help="Comma-separated Y columns to plot")
-    p.add_argument("--smooth", type=int, default=1,
-                   help="Trailing rolling-mean window (1 = no smoothing)")
-    p.add_argument("--title", type=str, default="",
-                   help="Plot title (default: derived from CSV path)")
-    p.add_argument("--ylabel", type=str, default="",
-                   help="Y-axis label (default: empty)")
-    p.add_argument("--out", type=str, default="",
-                   help="Output image path (default: show interactively)")
+    p.add_argument(
+        "--csv",
+        type=str,
+        required=True,
+        help="Path or glob (e.g. 'ppo/metrics_seed*.csv') to one or more CSV files. "
+        "If multiple files match, plots mean +/- std across runs.",
+    )
+    p.add_argument("--x", type=str, default="iteration", help="X-axis column (default: iteration)")
+    p.add_argument(
+        "--ys",
+        type=str,
+        default="eval_det_mean,eval_sto_mean",
+        help="Comma-separated Y columns to plot",
+    )
+    p.add_argument(
+        "--smooth", type=int, default=1, help="Trailing rolling-mean window (1 = no smoothing)"
+    )
+    p.add_argument(
+        "--title", type=str, default="", help="Plot title (default: derived from CSV path)"
+    )
+    p.add_argument("--ylabel", type=str, default="", help="Y-axis label (default: empty)")
+    p.add_argument(
+        "--out", type=str, default="", help="Output image path (default: show interactively)"
+    )
     args = p.parse_args()
 
     paths = sorted(Path(s) for s in glob.glob(args.csv))
@@ -119,9 +128,14 @@ def main():
             std = np.nanstd(y_arr, axis=0)
             mask = np.isfinite(mean)
             label = f"{yk} (n={len(runs)})"
-            line, = plt.plot(x_arr[mask], mean[mask], linewidth=1.6, label=label)
-            plt.fill_between(x_arr[mask], (mean - std)[mask], (mean + std)[mask],
-                             alpha=0.2, color=line.get_color())
+            (line,) = plt.plot(x_arr[mask], mean[mask], linewidth=1.6, label=label)
+            plt.fill_between(
+                x_arr[mask],
+                (mean - std)[mask],
+                (mean + std)[mask],
+                alpha=0.2,
+                color=line.get_color(),
+            )
         else:
             plt.plot(runs_x[0], runs_y[0], marker="o", markersize=3, linewidth=1.2, label=yk)
 

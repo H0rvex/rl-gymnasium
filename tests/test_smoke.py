@@ -7,6 +7,7 @@ Smoke tests — one per algorithm. Each test:
 Modules are loaded via importlib so the algorithm dirs don't need to be
 installed packages; only `common` needs `pip install -e .`.
 """
+
 import csv
 import importlib.util
 import math
@@ -16,7 +17,6 @@ from pathlib import Path
 from types import ModuleType
 
 import numpy as np
-import pytest
 import torch
 
 ROOT = Path(__file__).parent.parent
@@ -31,13 +31,14 @@ def _load(name: str, rel: str) -> ModuleType:
 
 
 reinforce = _load("reinforce_train", "reinforce/train.py")
-dqn      = _load("dqn_train",      "dqn/train.py")
-ppo      = _load("ppo_train",      "ppo/train.py")
+dqn = _load("dqn_train", "dqn/train.py")
+ppo = _load("ppo_train", "ppo/train.py")
 
 
 # --------------------------------------------------------------------------- #
 # helpers
 # --------------------------------------------------------------------------- #
+
 
 def _read_csv(path: Path) -> list[dict]:
     with path.open() as f:
@@ -54,6 +55,7 @@ def _finite(val: str) -> bool:
 # --------------------------------------------------------------------------- #
 # REINFORCE
 # --------------------------------------------------------------------------- #
+
 
 def test_reinforce_smoke(tmp_path):
     import gymnasium as gym
@@ -81,12 +83,14 @@ def test_reinforce_smoke(tmp_path):
             loss = reinforce.policy_gradient_update(
                 log_probs, rewards, optimizer, cfg.gamma, device
             )
-            logger.log({
-                "episode": ep,
-                "loss": loss,
-                "ep_return": sum(rewards),
-                "ep_length": len(rewards),
-            })
+            logger.log(
+                {
+                    "episode": ep,
+                    "loss": loss,
+                    "ep_return": sum(rewards),
+                    "ep_length": len(rewards),
+                }
+            )
 
     env.close()
 
@@ -99,6 +103,7 @@ def test_reinforce_smoke(tmp_path):
 # --------------------------------------------------------------------------- #
 # DQN
 # --------------------------------------------------------------------------- #
+
 
 def test_dqn_smoke(tmp_path):
     import gymnasium as gym
@@ -163,13 +168,15 @@ def test_dqn_smoke(tmp_path):
 
             epsilon = max(cfg.epsilon_end, epsilon * cfg.epsilon_decay)
             loss_mean = float(np.mean(losses)) if losses else float("nan")
-            logger.log({
-                "episode": ep,
-                "loss_mean": loss_mean,
-                "ep_return": ep_return,
-                "epsilon": epsilon,
-                "buffer_size": len(buf),
-            })
+            logger.log(
+                {
+                    "episode": ep,
+                    "loss_mean": loss_mean,
+                    "ep_return": ep_return,
+                    "epsilon": epsilon,
+                    "buffer_size": len(buf),
+                }
+            )
 
     env.close()
 
@@ -187,6 +194,7 @@ def test_dqn_smoke(tmp_path):
 # PPO
 # --------------------------------------------------------------------------- #
 
+
 def test_ppo_smoke(tmp_path):
     import gymnasium as gym
     from common import CsvLogger, resolve_device, seed_all
@@ -203,6 +211,7 @@ def test_ppo_smoke(tmp_path):
             env = gym.make(cfg.env_id)
             env.reset(seed=seed)
             return env
+
         return thunk
 
     envs = gym.vector.SyncVectorEnv(
@@ -223,38 +232,61 @@ def test_ppo_smoke(tmp_path):
     with CsvLogger(log_path, fieldnames) as logger:
         for it in range(N_ITERS):
             (
-                states, actions, log_probs, rewards, dones, terminateds,
-                values, next_values, episode_rewards, obs,
+                states,
+                actions,
+                log_probs,
+                rewards,
+                dones,
+                terminateds,
+                values,
+                next_values,
+                episode_rewards,
+                obs,
             ) = ppo.collect_rollout_vec(
-                model, envs, obs, obs_rms=obs_rms,
-                num_steps=cfg.rollout_steps, device=device, cfg=cfg,
+                model,
+                envs,
+                obs,
+                obs_rms=obs_rms,
+                num_steps=cfg.rollout_steps,
+                device=device,
+                cfg=cfg,
             )
 
             advantages, returns = ppo.compute_advantages_vec(
-                rewards, values, next_values, dones, terminateds,
-                gamma=cfg.gamma, lam=cfg.lam,
+                rewards,
+                values,
+                next_values,
+                dones,
+                terminateds,
+                gamma=cfg.gamma,
+                lam=cfg.lam,
             )
 
             B = cfg.rollout_steps * cfg.n_envs
             mean_kl, num_updates = ppo.ppo_update(
-                model, optimizer,
+                model,
+                optimizer,
                 states.reshape(B, obs_dim),
                 actions.reshape(B),
                 log_probs.reshape(B),
                 values.reshape(B),
                 advantages.reshape(B),
                 returns.reshape(B),
-                device=device, cfg=cfg, ent_coef=cfg.ent_coef_early,
+                device=device,
+                cfg=cfg,
+                ent_coef=cfg.ent_coef_early,
             )
 
             roll_mean = float(np.mean(episode_rewards)) if len(episode_rewards) else float("nan")
-            logger.log({
-                "iteration": it,
-                "env_steps": (it + 1) * cfg.rollout_steps * cfg.n_envs,
-                "approx_kl": mean_kl,
-                "updates": num_updates,
-                "rollout_ep_ret_mean": roll_mean,
-            })
+            logger.log(
+                {
+                    "iteration": it,
+                    "env_steps": (it + 1) * cfg.rollout_steps * cfg.n_envs,
+                    "approx_kl": mean_kl,
+                    "updates": num_updates,
+                    "rollout_ep_ret_mean": roll_mean,
+                }
+            )
 
     envs.close()
 

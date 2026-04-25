@@ -1,0 +1,14 @@
+.git
+.pytest_cache
+__pycache__
+*.pyc
+*.pt
+logs
+*/runs
+outputs
+rl_gymnasium.egg-info
+.ruff_cache
+ppo/.ruff_cache
+.vscode
+.codex
+.claude
