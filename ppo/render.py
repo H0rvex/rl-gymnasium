@@ -14,6 +14,7 @@ Requires imageio:  pip install imageio
 """
 
 import argparse
+import pickle
 from pathlib import Path
 
 import imageio
@@ -32,7 +33,10 @@ def load_checkpoint(
     device: torch.device,
 ) -> tuple[torch.nn.Module, RunningMeanStd | None]:
     """Return (model, obs_rms | None). None means legacy format — caller must warm up RMS."""
-    ckpt = torch.load(path, map_location=device, weights_only=True)
+    try:
+        ckpt = torch.load(path, map_location=device, weights_only=True)
+    except pickle.UnpicklingError:
+        ckpt = torch.load(path, map_location=device, weights_only=False)
     model = ActorCritic(obs_dim, action_dim, hidden_dim=cfg.hidden_dim).to(device)
 
     if isinstance(ckpt, dict) and "model" in ckpt:
@@ -131,9 +135,7 @@ def main() -> None:
     action_dim = env_probe.action_space.n
     env_probe.close()
 
-    model, obs_rms = load_checkpoint(
-        Path(args.checkpoint), obs_dim, action_dim, cfg, device
-    )
+    model, obs_rms = load_checkpoint(Path(args.checkpoint), obs_dim, action_dim, cfg, device)
 
     if obs_rms is None:
         warmup = args.warmup_steps if args.warmup_steps > 0 else 5000

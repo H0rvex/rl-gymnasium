@@ -9,7 +9,16 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from common import CsvLogger, TbLogger, resolve_device, seed_all
+from common import (
+    CsvLogger,
+    TbLogger,
+    prepare_run_dir,
+    resolve_device,
+    seed_all,
+    write_config_yaml,
+    write_eval_summary,
+    write_reward_curve,
+)
 
 
 @dataclass
@@ -17,8 +26,8 @@ class TrainConfig:
     # Environment
     env_id: str = "LunarLander-v3"
     n_envs: int = 8
-    rollout_steps: int = 256        # per env; total batch = n_envs * rollout_steps
-    
+    rollout_steps: int = 256  # per env; total batch = n_envs * rollout_steps
+
     # Network
     hidden_dim: int = 64
 
@@ -42,25 +51,26 @@ class TrainConfig:
     ent_coef_late: float = 0.005
     ent_floor_early: float = 0.001
     ent_floor_late: float = 0.0005
-    ent_switch: int = 300           # iteration at which late schedule kicks in
-    
+    ent_switch: int = 300  # iteration at which late schedule kicks in
+
     # Evaluation
     eval_interval: int = 10
     eval_episodes: int = 20
     obs_clip: float = 10.0
 
+
 # Type alias for collect_rollout_vec return
 RolloutBatch = Tuple[
-    torch.Tensor,   # states      [T, N, obs_dim]
-    torch.Tensor,   # actions     [T, N]
-    torch.Tensor,   # log_probs   [T, N]
-    torch.Tensor,   # rewards     [T, N]
-    torch.Tensor,   # dones       [T, N]
-    torch.Tensor,   # terminateds [T, N]
-    torch.Tensor,   # values      [T, N]
-    torch.Tensor,   # next_values [T, N]
-    np.ndarray,     # finished episode returns
-    np.ndarray,     # next obs (for continuing rollout)
+    torch.Tensor,  # states      [T, N, obs_dim]
+    torch.Tensor,  # actions     [T, N]
+    torch.Tensor,  # log_probs   [T, N]
+    torch.Tensor,  # rewards     [T, N]
+    torch.Tensor,  # dones       [T, N]
+    torch.Tensor,  # terminateds [T, N]
+    torch.Tensor,  # values      [T, N]
+    torch.Tensor,  # next_values [T, N]
+    np.ndarray,  # finished episode returns
+    np.ndarray,  # next obs (for continuing rollout)
 ]
 
 
@@ -218,9 +228,16 @@ def collect_rollout_vec(
         obs = next_obs
 
     return (
-        states, actions, log_probs, rewards, dones, terminateds,
-        values, next_values,
-        np.array(finished_ep_returns, dtype=np.float32), obs,
+        states,
+        actions,
+        log_probs,
+        rewards,
+        dones,
+        terminateds,
+        values,
+        next_values,
+        np.array(finished_ep_returns, dtype=np.float32),
+        obs,
     )
 
 
@@ -250,8 +267,8 @@ def compute_advantages_vec(
     gae = torch.zeros((N,), dtype=torch.float32)
 
     for t in reversed(range(T)):
-        gae_mask = 1.0 - dones[t]          # reset at episode end (terminated OR truncated)
-        boot_mask = 1.0 - terminateds[t]   # bootstrap if NOT a real terminal
+        gae_mask = 1.0 - dones[t]  # reset at episode end (terminated OR truncated)
+        boot_mask = 1.0 - terminateds[t]  # bootstrap if NOT a real terminal
         delta = rewards[t] + gamma * next_values[t] * boot_mask - values[t]
         gae = delta + gamma * lam * gae_mask * gae
         advantages[t] = gae
@@ -290,7 +307,7 @@ def ppo_update(
         stop_early = False
 
         for start in range(0, n, cfg.batch_size):
-            mb_idx = indices[start:start + cfg.batch_size]
+            mb_idx = indices[start : start + cfg.batch_size]
 
             logits, values = model(states[mb_idx])
             dist = torch.distributions.Categorical(logits=logits)
@@ -370,6 +387,19 @@ def evaluate(
 
 def main(args: argparse.Namespace) -> None:
     cfg = TrainConfig()
+    run_dir = prepare_run_dir(Path(args.out_dir)) if args.out_dir else None
+    if run_dir is not None:
+        write_config_yaml(
+            run_dir / "config.yaml",
+            {
+                "algorithm": "ppo",
+                "env_id": cfg.env_id,
+                "seed": args.seed,
+                "trainer": "ppo/train.py",
+                "train_config": cfg,
+                "cli_args": vars(args),
+            },
+        )
 
     seed_all(args.seed)
     device = resolve_device(args.device)
@@ -380,6 +410,7 @@ def main(args: argparse.Namespace) -> None:
             env = gym.make(env_id)
             env.reset(seed=seed)
             return env
+
         return thunk
 
     # SAME_STEP autoreset (the old default) matches collect_rollout_vec's
@@ -401,36 +432,80 @@ def main(args: argparse.Namespace) -> None:
     obs, _ = envs.reset(seed=[args.seed * 1000 + i for i in range(cfg.n_envs)])
     best_eval = -float("inf")
 
-    log_path = Path(__file__).with_name(f"metrics_seed{args.seed}.csv")
-    tb_dir = Path(__file__).parent / "runs" / f"seed{args.seed}"
+    log_path = (
+        run_dir / "metrics.csv"
+        if run_dir
+        else Path(__file__).with_name(f"metrics_seed{args.seed}.csv")
+    )
+    ckpt_path = (
+        run_dir / "checkpoint.pt"
+        if run_dir
+        else Path(__file__).with_name(f"best_ppo_lunarlander_seed{args.seed}.pt")
+    )
+    tb_dir = (
+        (run_dir / "tensorboard")
+        if run_dir
+        else Path(__file__).parent / "runs" / f"seed{args.seed}"
+    )
     fieldnames = [
-        "iteration", "env_steps", "dt_sec", "lr", "ent_coef",
-        "approx_kl", "updates", "rollout_ep_ret_mean", "rollout_ep_ret_n",
-        "eval_det_mean", "eval_det_std", "eval_sto_mean", "eval_sto_std", "best_eval_det",
+        "iteration",
+        "env_steps",
+        "dt_sec",
+        "lr",
+        "ent_coef",
+        "approx_kl",
+        "updates",
+        "rollout_ep_ret_mean",
+        "rollout_ep_ret_n",
+        "eval_det_mean",
+        "eval_det_std",
+        "eval_sto_mean",
+        "eval_sto_std",
+        "best_eval_det",
     ]
 
     with CsvLogger(log_path, fieldnames) as logger, TbLogger(tb_dir) as tb:
         for iteration in range(args.iterations):
             t0 = time.time()
             (
-                states, actions, log_probs, rewards, dones, terminateds,
-                values, next_values, episode_rewards, obs,
-            ) = collect_rollout_vec(model, envs, obs, obs_rms=obs_rms,
-                                    num_steps=cfg.rollout_steps, device=device, cfg=cfg)
+                states,
+                actions,
+                log_probs,
+                rewards,
+                dones,
+                terminateds,
+                values,
+                next_values,
+                episode_rewards,
+                obs,
+            ) = collect_rollout_vec(
+                model,
+                envs,
+                obs,
+                obs_rms=obs_rms,
+                num_steps=cfg.rollout_steps,
+                device=device,
+                cfg=cfg,
+            )
 
             advantages, returns = compute_advantages_vec(
-                rewards, values, next_values, dones, terminateds,
-                gamma=cfg.gamma, lam=cfg.lam,
+                rewards,
+                values,
+                next_values,
+                dones,
+                terminateds,
+                gamma=cfg.gamma,
+                lam=cfg.lam,
             )
 
             # flatten [T, N, ...] -> [B, ...]
             B = cfg.rollout_steps * cfg.n_envs
-            states_f    = states.reshape(B, obs_dim)
-            actions_f   = actions.reshape(B)
+            states_f = states.reshape(B, obs_dim)
+            actions_f = actions.reshape(B)
             log_probs_f = log_probs.reshape(B)
-            values_f    = values.reshape(B)
+            values_f = values.reshape(B)
             advantages_f = advantages.reshape(B)
-            returns_f   = returns.reshape(B)
+            returns_f = returns.reshape(B)
 
             # Light schedules; keep exploration early, converge later
             frac = 1.0 - iteration / args.iterations
@@ -445,9 +520,17 @@ def main(args: argparse.Namespace) -> None:
                 pg["lr"] = lr_now
 
             mean_kl, num_updates = ppo_update(
-                model, optimizer,
-                states_f, actions_f, log_probs_f, values_f, advantages_f, returns_f,
-                device=device, cfg=cfg, ent_coef=ent_coef,
+                model,
+                optimizer,
+                states_f,
+                actions_f,
+                log_probs_f,
+                values_f,
+                advantages_f,
+                returns_f,
+                device=device,
+                cfg=cfg,
+                ent_coef=ent_coef,
             )
 
             roll_mean = float(np.mean(episode_rewards)) if len(episode_rewards) else float("nan")
@@ -460,41 +543,57 @@ def main(args: argparse.Namespace) -> None:
             )
 
             mean_eval_det = float("nan")
-            std_eval_det  = float("nan")
+            std_eval_det = float("nan")
             mean_eval_sto = float("nan")
-            std_eval_sto  = float("nan")
+            std_eval_sto = float("nan")
 
             if iteration % cfg.eval_interval == 0:
                 # Freeze normalization stats for consistent evaluation
                 obs_rms_eval = obs_rms.snapshot()
-                mean_eval_det, std_eval_det = evaluate(model, obs_rms_eval, device, cfg, deterministic=True)
-                mean_eval_sto, std_eval_sto = evaluate(model, obs_rms_eval, device, cfg, deterministic=False)
+                mean_eval_det, std_eval_det = evaluate(
+                    model, obs_rms_eval, device, cfg, deterministic=True
+                )
+                mean_eval_sto, std_eval_sto = evaluate(
+                    model, obs_rms_eval, device, cfg, deterministic=False
+                )
 
                 print(f"Det eval: {mean_eval_det:.1f} ± {std_eval_det:.1f}")
                 print(f"Sto eval: {mean_eval_sto:.1f} ± {std_eval_sto:.1f}")
 
                 if mean_eval_det > best_eval:
                     best_eval = mean_eval_det
-                    ckpt_path = Path(__file__).with_name(f"best_ppo_lunarlander_seed{args.seed}.pt")
-                    torch.save({
-                        "model": model.state_dict(),
-                        "obs_rms_mean": obs_rms_eval.mean,
-                        "obs_rms_var": obs_rms_eval.var,
-                        "obs_rms_count": obs_rms_eval.count,
-                    }, ckpt_path)
-                    print(f"New best model saved with eval reward {best_eval:.1f} -> {ckpt_path.name}")
+                    torch.save(
+                        {
+                            "model": model.state_dict(),
+                            "obs_rms_mean": obs_rms_eval.mean.tolist(),
+                            "obs_rms_var": obs_rms_eval.var.tolist(),
+                            "obs_rms_count": obs_rms_eval.count,
+                        },
+                        ckpt_path,
+                    )
+                    print(
+                        f"New best model saved with eval reward {best_eval:.1f} -> {ckpt_path.name}"
+                    )
 
             env_steps = (iteration + 1) * cfg.rollout_steps * cfg.n_envs
-            logger.log({
-                "iteration": iteration,
-                "env_steps": env_steps,
-                "dt_sec": dt, "lr": lr_now, "ent_coef": ent_coef,
-                "approx_kl": mean_kl, "updates": num_updates,
-                "rollout_ep_ret_mean": roll_mean, "rollout_ep_ret_n": roll_n,
-                "eval_det_mean": mean_eval_det, "eval_det_std": std_eval_det,
-                "eval_sto_mean": mean_eval_sto, "eval_sto_std": std_eval_sto,
-                "best_eval_det": best_eval,
-            })
+            logger.log(
+                {
+                    "iteration": iteration,
+                    "env_steps": env_steps,
+                    "dt_sec": dt,
+                    "lr": lr_now,
+                    "ent_coef": ent_coef,
+                    "approx_kl": mean_kl,
+                    "updates": num_updates,
+                    "rollout_ep_ret_mean": roll_mean,
+                    "rollout_ep_ret_n": roll_n,
+                    "eval_det_mean": mean_eval_det,
+                    "eval_det_std": std_eval_det,
+                    "eval_sto_mean": mean_eval_sto,
+                    "eval_sto_std": std_eval_sto,
+                    "best_eval_det": best_eval,
+                }
+            )
             tb.scalar("train/approx_kl", mean_kl, env_steps)
             tb.scalar("train/rollout_ep_ret_mean", roll_mean, env_steps)
             tb.scalar("train/lr", lr_now, env_steps)
@@ -503,17 +602,45 @@ def main(args: argparse.Namespace) -> None:
             tb.scalar("eval/sto_mean", mean_eval_sto, env_steps)
             tb.scalar("eval/best_det", best_eval, env_steps)
 
+    envs.close()
+    if run_dir is not None:
+        write_reward_curve(
+            log_path,
+            run_dir / "reward_curve.png",
+            x_key="iteration",
+            y_key="rollout_ep_ret_mean",
+            title="PPO LunarLander-v3 rollout return",
+            smooth=50,
+        )
+        write_eval_summary(
+            log_path,
+            run_dir / "eval_summary.json",
+            algorithm="ppo",
+            env_id=cfg.env_id,
+            seed=args.seed,
+            train_return_key="rollout_ep_ret_mean",
+        )
 
-def parse_args() -> argparse.Namespace:
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--seed", type=int, default=0,
-                        help="Random seed for torch / numpy / env reset")
-    parser.add_argument("--iterations", type=int, default=1000,
-                        help="Number of PPO iterations to train for")
-    parser.add_argument("--device", type=str, default="auto",
-                        choices=["auto", "cpu", "cuda"],
-                        help="Compute device. 'auto' picks cuda if available, else cpu.")
-    return parser.parse_args()
+    parser.add_argument(
+        "--seed", type=int, default=0, help="Random seed for torch / numpy / env reset"
+    )
+    parser.add_argument(
+        "--iterations", type=int, default=1000, help="Number of PPO iterations to train for"
+    )
+    parser.add_argument(
+        "--device",
+        type=str,
+        default="auto",
+        choices=["auto", "cpu", "cuda"],
+        help="Compute device. 'auto' picks cuda if available, else cpu.",
+    )
+    parser.add_argument(
+        "--out-dir", type=str, default="", help="Optional run directory for portfolio artifacts."
+    )
+    return parser.parse_args(argv)
 
 
 if __name__ == "__main__":

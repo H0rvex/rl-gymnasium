@@ -11,7 +11,16 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from common import CsvLogger, TbLogger, resolve_device, seed_all
+from common import (
+    CsvLogger,
+    TbLogger,
+    prepare_run_dir,
+    resolve_device,
+    seed_all,
+    write_config_yaml,
+    write_eval_summary,
+    write_reward_curve,
+)
 
 
 @dataclass
@@ -160,6 +169,20 @@ def evaluate(
 
 def main(args: argparse.Namespace) -> None:
     cfg = TrainConfig()
+    run_dir = prepare_run_dir(Path(args.out_dir)) if args.out_dir else None
+    if run_dir is not None:
+        write_config_yaml(
+            run_dir / "config.yaml",
+            {
+                "algorithm": "dqn",
+                "variant": "double_dqn" if args.double_dqn else "vanilla_dqn",
+                "env_id": cfg.env_id,
+                "seed": args.seed,
+                "trainer": "dqn/train.py",
+                "train_config": cfg,
+                "cli_args": vars(args),
+            },
+        )
 
     seed_all(args.seed)
     py_rng = random.Random(args.seed)
@@ -182,12 +205,37 @@ def main(args: argparse.Namespace) -> None:
     optimizer = torch.optim.Adam(q_net.parameters(), lr=cfg.lr)
     buffer = ReplayBuffer(cfg.buffer_capacity, py_rng)
 
-    log_path = Path(__file__).with_name(f"metrics_seed{args.seed}.csv")
-    tb_dir = Path(__file__).parent / "runs" / f"seed{args.seed}"
+    log_path = (
+        run_dir / "metrics.csv"
+        if run_dir
+        else Path(__file__).with_name(f"metrics_seed{args.seed}.csv")
+    )
+    tag = "double_dqn" if args.double_dqn else "dqn"
+    ckpt_path = (
+        run_dir / "checkpoint.pt"
+        if run_dir
+        else Path(__file__).with_name(f"best_{tag}_cartpole_seed{args.seed}.pt")
+    )
+    tb_dir = (
+        (run_dir / "tensorboard")
+        if run_dir
+        else Path(__file__).parent / "runs" / f"seed{args.seed}"
+    )
     fieldnames = [
-        "episode", "env_steps", "dt_sec", "loss_mean", "epsilon", "buffer_size",
-        "ep_return", "ep_length", "train_updates",
-        "eval_det_mean", "eval_det_std", "eval_sto_mean", "eval_sto_std", "best_eval_det",
+        "episode",
+        "env_steps",
+        "dt_sec",
+        "loss_mean",
+        "epsilon",
+        "buffer_size",
+        "ep_return",
+        "ep_length",
+        "train_updates",
+        "eval_det_mean",
+        "eval_det_std",
+        "eval_sto_mean",
+        "eval_sto_std",
+        "best_eval_det",
     ]
 
     epsilon = cfg.epsilon_start
@@ -253,49 +301,81 @@ def main(args: argparse.Namespace) -> None:
 
                 if mean_eval_det > best_eval:
                     best_eval = mean_eval_det
-                    tag = "double_dqn" if args.double_dqn else "dqn"
-                    ckpt_path = Path(__file__).with_name(f"best_{tag}_cartpole_seed{args.seed}.pt")
                     torch.save({"model": q_net.state_dict()}, ckpt_path)
 
-            logger.log({
-                "episode": episode,
-                "env_steps": total_env_steps,
-                "dt_sec": dt,
-                "loss_mean": loss_mean,
-                "epsilon": epsilon,
-                "buffer_size": len(buffer),
-                "ep_return": ep_return,
-                "ep_length": ep_length,
-                "train_updates": len(losses),
-                "eval_det_mean": mean_eval_det,
-                "eval_det_std": std_eval_det,
-                "eval_sto_mean": mean_eval_sto,
-                "eval_sto_std": std_eval_sto,
-                "best_eval_det": best_eval if best_eval > -float("inf") else float("nan"),
-            })
+            logger.log(
+                {
+                    "episode": episode,
+                    "env_steps": total_env_steps,
+                    "dt_sec": dt,
+                    "loss_mean": loss_mean,
+                    "epsilon": epsilon,
+                    "buffer_size": len(buffer),
+                    "ep_return": ep_return,
+                    "ep_length": ep_length,
+                    "train_updates": len(losses),
+                    "eval_det_mean": mean_eval_det,
+                    "eval_det_std": std_eval_det,
+                    "eval_sto_mean": mean_eval_sto,
+                    "eval_sto_std": std_eval_sto,
+                    "best_eval_det": best_eval if best_eval > -float("inf") else float("nan"),
+                }
+            )
             tb.scalar("train/loss_mean", loss_mean, total_env_steps)
             tb.scalar("train/ep_return", ep_return, total_env_steps)
             tb.scalar("train/epsilon", epsilon, total_env_steps)
             tb.scalar("eval/det_mean", mean_eval_det, total_env_steps)
             tb.scalar("eval/sto_mean", mean_eval_sto, total_env_steps)
-            tb.scalar("eval/best_det", best_eval if best_eval > -float("inf") else float("nan"), total_env_steps)
+            tb.scalar(
+                "eval/best_det",
+                best_eval if best_eval > -float("inf") else float("nan"),
+                total_env_steps,
+            )
 
     env.close()
+    if run_dir is not None:
+        write_reward_curve(
+            log_path,
+            run_dir / "reward_curve.png",
+            x_key="episode",
+            y_key="ep_return",
+            title="DQN CartPole-v1 training return",
+            smooth=50,
+        )
+        write_eval_summary(
+            log_path,
+            run_dir / "eval_summary.json",
+            algorithm="dqn",
+            env_id=cfg.env_id,
+            seed=args.seed,
+            train_return_key="ep_return",
+        )
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--seed", type=int, default=0,
-                        help="Random seed for torch / numpy / env reset")
-    parser.add_argument("--episodes", type=int, default=2000,
-                        help="Number of training episodes")
-    parser.add_argument("--device", type=str, default="auto",
-                        choices=["auto", "cpu", "cuda"],
-                        help="Compute device. 'auto' picks cuda if available, else cpu.")
-    parser.add_argument("--double-dqn", action=argparse.BooleanOptionalAction, default=True,
-                        help="Use Double DQN target (online-net action, target-net value). "
-                             "Pass --no-double-dqn for vanilla DQN.")
-    return parser.parse_args()
+    parser.add_argument(
+        "--seed", type=int, default=0, help="Random seed for torch / numpy / env reset"
+    )
+    parser.add_argument("--episodes", type=int, default=2000, help="Number of training episodes")
+    parser.add_argument(
+        "--device",
+        type=str,
+        default="auto",
+        choices=["auto", "cpu", "cuda"],
+        help="Compute device. 'auto' picks cuda if available, else cpu.",
+    )
+    parser.add_argument(
+        "--double-dqn",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Use Double DQN target (online-net action, target-net value). "
+        "Pass --no-double-dqn for vanilla DQN.",
+    )
+    parser.add_argument(
+        "--out-dir", type=str, default="", help="Optional run directory for portfolio artifacts."
+    )
+    return parser.parse_args(argv)
 
 
 if __name__ == "__main__":
